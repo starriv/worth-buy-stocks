@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""因子有效性回测：composite 分能否预测未来收益（information coefficient 研究）。
+
+方法（严格避免未来函数）：
+  - 取一篮子流动性大盘股 + SPY/QQQ 的多年日线（backtest_common.load_panel）。
+  - 在历史上按月（每 STEP=21 交易日）设若干 rebalance 时点 t。
+  - 在每个 t：只用 <= t 的日线，对每只票跑 build_result → composite 分。
+  - 前瞻收益 = 该票在 t+H 交易日的收盘 / t 收盘 - 1（H=21、63）。
+  - 汇总：分数分桶的平均前瞻收益、Spearman 截面 IC、top-bottom 多空价差。
+
+输出纯统计，不下单。仅用本机 alpaca CLI 拉数。含幸存者偏差，看方向与量级。
+"""
+import argparse
+import sys
+
+sys.path.insert(0, __import__("os").path.dirname(__file__))
+from backtest_common import (  # noqa: E402
+    UNIVERSE, WARMUP, STEP, HORIZONS,
+    load_panel, spearman, mean_t, bucket_mean, quintile_spread,
+)
+
+
+def run(feed, adjustment, timeout):
+    panel = load_panel(feed, adjustment, timeout)
+    if len(panel.calendar) < WARMUP + max(HORIZONS) + STEP:
+        print("历史不足，无法回测", file=sys.stderr)
+        return
+    rebal_idx = list(range(WARMUP, len(panel.calendar) - max(HORIZONS), STEP))
+    print(f"rebalance 时点数: {len(rebal_idx)}", file=sys.stderr)
+
+    obs = {h: [] for h in HORIZONS}        # (composite, fwd_ret)
+    ic_by_date = {h: [] for h in HORIZONS}
+    for ti in rebal_idx:
+        symbols = panel.scores_at(panel.calendar[ti])
+        per_date = {h: ([], []) for h in HORIZONS}
+        for s in UNIVERSE:
+            comp = (symbols.get(s, {}).get("score") or {}).get("composite")
+            if comp is None:
+                continue
+            for h in HORIZONS:
+                fwd = panel.fwd_return_pct(s, ti, h)
+                if fwd is None:
+                    continue
+                obs[h].append((comp, fwd))
+                per_date[h][0].append(comp)
+                per_date[h][1].append(fwd)
+        for h in HORIZONS:
+            ic = spearman(*per_date[h])
+            if ic is not None:
+                ic_by_date[h].append(ic)
+    _report(obs, ic_by_date)
+
+
+def _report(obs, ic_by_date):
+    print("\n" + "=" * 60)
+    print("因子有效性回测结果（composite 分 vs 前瞻收益）")
+    print("=" * 60)
+    for h in sorted(obs):
+        pairs = obs[h]
+        print(f"\n── 前瞻 {h} 交易日 ──   样本数 N={len(pairs)}")
+        for label, lo, hi in (("分数<60 (否)", 0, 60),
+                              ("60-75 (观察)", 60, 75),
+                              (">=75 (是)", 75, 1e9)):
+            m, n = bucket_mean(pairs, lo, hi)
+            print(f"   {label:14} 平均前瞻收益 {m:+.2f}%   (n={n})" if m is not None
+                  else f"   {label:14} 无样本")
+        qs = quintile_spread(pairs)
+        if qs:
+            spread, top, bot = qs
+            print(f"   五分位: 最高分组 {top:+.2f}%  最低分组 {bot:+.2f}%  多空价差 {spread:+.2f}%")
+        st = mean_t(ic_by_date[h])
+        if st:
+            mic, t, ndays = st
+            pos = sum(1 for x in ic_by_date[h] if x > 0) / ndays * 100
+            print(f"   Spearman 截面 IC: 均值 {mic:+.3f}  t≈{t:+.2f}  "
+                  f"IC>0 占比 {pos:.0f}%  ({ndays} 期)")
+    print("\n注：篮子含幸存者偏差，真实 edge 偏乐观；看方向与单调性而非绝对收益。")
+
+
+def main():
+    p = argparse.ArgumentParser(description="composite 分因子有效性回测")
+    p.add_argument("--feed", default="iex")
+    p.add_argument("--adjustment", default="split")
+    p.add_argument("--timeout", type=int, default=60)
+    args = p.parse_args()
+    run(args.feed, args.adjustment, args.timeout)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,4 @@
+interface:
+  display_name: "值得买 - 股票版"
+  short_description: "Alpaca 趋势评分和买入结论"
+  default_prompt: "用 $worth-buy-stocks 判断 AAPL 是否值得买，只使用 Alpaca 市场数据。"
