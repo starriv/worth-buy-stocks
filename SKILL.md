@@ -112,20 +112,16 @@ ADX 解读要点（脚本字段 `trend_quality.adx.{ADX,plus_DI,minus_DI,trend_s
 
 风控分为两层：**否决层**（由脚本 `score.risk_gates` 输出）和**确认层**（由 `score.confirmation` 给出）。模型职责是解读这些输出，不自行判断。
 
-**否决层（1-5，触发任一 → 新买入为否，与脚本封顶一致）：**
+**否决层（由 `score.risk_gates` 给出，触发后按脚本封顶）：**
 1. 200 日线：`above_MA200=false` 且 `MA200_rising=false` → risk-off
 2. MA60：`above_MA60=false` → 趋势走弱
 3. 周线空头排列：`weekly.bearish_alignment=true`
-4. 趋势质量：效率比极低 + 回归 R² 低且斜率负 → 无趋势
-5. 相对强度：3 个月和 6 个月均跑输 SPY/QQQ，或距 52 周高点 > 约 25%
 
-**确认层（6-9，不满足时通常封顶为「观察」）：**
-6. 30 日结构：区间位置、MA10/20/30 支持趋势延续
-7. 当日确认：非冲高回落/接近日低/价差异常/数据陈旧
-8. 技术确认：MACD/RSI/KDJ 多数偏多，无顶背离/高位死叉
-9. 量价确认：OBV 无顶背离、量能趋势健康（涨放量跌缩量）
+**确认层（由 `score.confirmation` 给出）：**
+4. 技术确认：MACD/RSI/KDJ 多数偏多，无明显死叉或转弱。`confirmation.ok=false` 时，原本可能的 `是` 封顶为 `观察`。
+5. 量价和趋势质量：输出 `volume_pct` 与 `trend_quality_pct` 作为解释和风险提示；不进入排名分，也不直接改变 `confirmation.ok`。
 
-强制排除条件：否决层任一不满足，新买入结论必须为「否」。确认层不满足时通常只能「观察」（除非已持仓风险管理）。技术/量价仅作确认，不推翻趋势/相对强度结论。
+风险闸门会限制最终评分上限；确认层只降级不加分。30 日结构和当日 snapshot 是入场解释字段，不自行覆盖 `score.verdict`，除非用户明确要求按盘中执行质量做更保守处理。
 
 ## 评分规则（确定性引擎）
 
@@ -137,7 +133,7 @@ ADX 解读要点（脚本字段 `trend_quality.adx.{ADX,plus_DI,minus_DI,trend_s
 
 - `composite`（0–100）：ALPHA 因子加权后、再经风险否决封顶的最终分。`raw_composite` 为封顶前原始分。
 - `factor_breakdown`：ALPHA 因子的 `score_pct` / `points` / `weight`。权重为 **风险调整动量 60 · 相对强度 40**；缺失因子按可用权重重归一（不会无脑扣到 0）。
-- `confirmation`：`{technical_pct, volume_pct, trend_quality_pct, ok}`——技术/量价/趋势质量仅作**确认**（IC≈0，不进排名分）；`ok=false`（技术转弱）时把本可成立的「是」封顶为「观察」，绝不加分。`trend_quality_pct` 包含 ADX 贡献，辅助判断趋势力度。
+- `confirmation`：`{technical_pct, volume_pct, trend_quality_pct, ok}`——技术/量价/趋势质量不进排名分；`ok` 由技术确认决定，`ok=false` 时把本可成立的「是」封顶为「观察」。`volume_pct` 与 `trend_quality_pct` 用于解释风险，不直接改变 verdict。
 - `risk_gates`：触发的风险否决原因（空数组表示无）。否决层封顶规则：跌破下行 200 日线 → 封顶 55；仅跌破 200 日线 → 70；周线空头排列 → 50；跌破 MA60 → 65。trend（MA200/MA60/周线）的价值集中在此，而非排名加权。
 - `suggested_position_pct`：反波动率仓位建议（`目标年化波动 20% / 实现波动 × 信号强度`，上限 100%）——仅作参考，不下单。
 - `data_flags`：数据不足导致的因子缺失/重归一说明。
@@ -186,7 +182,7 @@ ADX 解读要点（脚本字段 `trend_quality.adx.{ADX,plus_DI,minus_DI,trend_s
 
 **评分拆解**
 
-直接引用 `score.factor_breakdown` 的六因子得分（趋势、风险调整动量、相对强度、趋势质量、技术、量价）与各自权重，给出 `composite/100` 与 `raw_composite`；若 `risk_gates` 非空，列出否决原因并说明已封顶。附 `suggested_position_pct`（反波动率仓位建议，仅参考）。**分数照搬脚本，不自行重算。**
+直接引用 `score.factor_breakdown` 的 ALPHA 因子得分（风险调整动量、相对强度）与各自权重，给出 `composite/100` 与 `raw_composite`；若 `risk_gates` 非空，列出否决原因并说明已封顶。再列出 `confirmation.technical_pct/volume_pct/trend_quality_pct` 与 `suggested_position_pct`（反波动率仓位建议，仅参考）。**分数照搬脚本，不自行重算。**
 
 **建议**
 
