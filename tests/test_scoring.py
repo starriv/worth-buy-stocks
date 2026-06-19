@@ -77,6 +77,49 @@ class TestGates(unittest.TestCase):
         self.assertLessEqual(r["composite"], 65)
 
 
+class TestMarketRegimeGate(unittest.TestCase):
+    def test_market_risk_off_caps_buy_to_watch(self):
+        # 个股极强（本应「是」），但大盘 risk-off → 封顶 65 → 最高「观察」
+        a = _strong()
+        base = S.score(a)
+        self.assertEqual(base["verdict"], "是")
+        gated = S.score(a, market_risk_off=True)
+        self.assertLessEqual(gated["composite"], 65)
+        self.assertEqual(gated["verdict"], "观察")
+        self.assertTrue(any("大盘 risk-off" in g for g in gated["risk_gates"]))
+
+    def test_market_risk_on_no_gate(self):
+        a = _strong()
+        self.assertEqual(S.score(a, market_risk_off=None)["composite"],
+                         S.score(a)["composite"])
+        self.assertEqual(S.score(a, market_risk_off=False)["composite"],
+                         S.score(a)["composite"])
+
+    def test_build_result_threads_spy_regime(self):
+        # build_result 应从 SPY 的 above_MA200 推导市场 regime 并传给每只票打分。
+        import analysis as A
+
+        def bars(path):  # path: 收盘价序列 → 最简 OHLCV bar 列表
+            from datetime import date, timedelta
+            d0 = date(2024, 1, 1)
+            out = []
+            for i, c in enumerate(path):
+                d = (d0 + timedelta(days=i)).isoformat()
+                out.append({"t": f"{d}T05:00:00Z", "o": c, "h": c * 1.01,
+                            "l": c * 0.99, "c": c, "v": 1_000_000})
+            return out
+
+        n = 260
+        up = [100.0 * (1.004 ** i) for i in range(n)]       # 强势个股
+        spy_down = [400.0 * (0.999 ** i) for i in range(n)]  # SPY 长期下行 → 跌破 MA200
+        data = {"WIN": bars(up), "SPY": bars(spy_down), "QQQ": bars(spy_down)}
+        res = A.build_result(["WIN", "SPY", "QQQ"], data, "iex", "split")
+        self.assertTrue(res.get("market_risk_off"))
+        win = res["symbols"]["WIN"]["score"]
+        self.assertTrue(any("大盘 risk-off" in g for g in win["risk_gates"]))
+        self.assertLessEqual(win["composite"], 65)
+
+
 class TestRenormalize(unittest.TestCase):
     def test_missing_factor_flagged_and_renormalized(self):
         a = _strong()
@@ -196,6 +239,68 @@ class TestVolumeOBV(unittest.TestCase):
         a["volume"]["up_down_vol_ratio"] = 0.5  # 跌日放量 > 涨日放量
         r = S.score(a)
         self.assertLess(r["confirmation"]["volume_pct"], 90)
+
+
+class TestEfficiencyFactor(unittest.TestCase):
+    def test_efficiency_in_alpha_breakdown(self):
+        r = S.score(_strong())
+        self.assertIn("efficiency", r["factor_breakdown"])
+        # _strong 的 efficiency_30=0.7 → score_pct≈70
+        self.assertEqual(r["factor_breakdown"]["efficiency"]["score_pct"], 70)
+        self.assertEqual(r["weights"]["efficiency"], 10)
+
+    def test_missing_efficiency_renormalizes(self):
+        a = _strong()
+        del a["trend_quality"]["efficiency_30"]
+        r = S.score(a)
+        self.assertIsNone(r["factor_breakdown"]["efficiency"]["score_pct"])
+        self.assertTrue(any("efficiency" in f for f in r["data_flags"]))
+        # 仍能给出 composite（按 momentum+rel 可用权重重归一）
+        self.assertIsNotNone(r["composite"])
+        self.assertEqual(r["verdict"], "是")
+
+    def test_low_efficiency_lowers_composite(self):
+        hi, lo = _strong(), _strong()
+        lo["trend_quality"]["efficiency_30"] = 0.1
+        self.assertGreater(S.score(hi)["composite"], S.score(lo)["composite"])
+
+
+class TestLiquidityFlag(unittest.TestCase):
+    def test_low_dollar_volume_flagged(self):
+        a = _strong()
+        a["volume"]["dollar_vol_ma20"] = 1_000_000  # $1M < $5M 门槛
+        r = S.score(a)
+        self.assertTrue(any("流动性门槛" in f for f in r["data_flags"]))
+
+    def test_high_dollar_volume_not_flagged(self):
+        a = _strong()
+        a["volume"]["dollar_vol_ma20"] = 500_000_000  # $500M
+        r = S.score(a)
+        self.assertFalse(any("流动性门槛" in f for f in r["data_flags"]))
+
+    def test_missing_dollar_volume_no_flag(self):
+        # 字段缺失（旧数据）→ 不报流动性 flag，向后兼容
+        r = S.score(_strong())
+        self.assertFalse(any("流动性门槛" in f for f in r["data_flags"]))
+
+
+class TestRelStrength(unittest.TestCase):
+    def test_single_weak_reading_not_collapsed(self):
+        """一个视界对一个基准弱，不应把整体压到地板（旧版全局 min 的缺陷）。"""
+        a = _strong()
+        # SPY 强，QQQ 的 3m 很弱：旧版 min=-20 会塌；新版每视界取较弱+跨视界均值
+        a["relative_strength_pct"] = {
+            "SPY": {"r3m_63d": 20.0, "r6m_126d": 25.0},
+            "QQQ": {"r3m_63d": -20.0, "r6m_126d": 18.0},
+        }
+        rs_pct = S.score(a)["factor_breakdown"]["rel_strength"]["score_pct"]
+        # r3m 取 min(20,-20)=-20，r6m 取 min(25,18)=18，均值=-1 → logistic≈48-50
+        self.assertGreater(rs_pct, 40)
+
+    def test_missing_rel_strength_is_none(self):
+        a = _strong()
+        a["relative_strength_pct"] = {}
+        self.assertIsNone(S.score(a)["factor_breakdown"]["rel_strength"]["score_pct"])
 
 
 class TestEdge(unittest.TestCase):

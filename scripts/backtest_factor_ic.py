@@ -13,7 +13,7 @@ from backtest_common import (  # noqa: E402
 )
 
 # alpha 因子从 factor_breakdown 读；technical/volume 已移到 confirmation overlay
-ALPHA_FACTORS = ["momentum", "rel_strength", "trend", "trend_quality"]
+ALPHA_FACTORS = ["momentum", "rel_strength", "efficiency", "trend", "trend_quality"]
 OVERLAY_FACTORS = ["technical", "volume_exec"]
 COLS = ALPHA_FACTORS + OVERLAY_FACTORS + ["composite"]
 

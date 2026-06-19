@@ -41,9 +41,12 @@ def analyze_symbol(bars):
     high_w = max(highs[-STRUCT_WINDOW:])
     rng = high_w - low_w
     pos = round((last - low_w) / rng * 100, 1) if rng else None
+    dist_to_30d_high = round((last / high_w - 1) * 100, 2) if high_w else None
 
     vol_ma20 = ma(vols, 20)
     vol_ma50 = ma(vols, 50)
+    # 20 日均成交额（美元）：流动性/可交易性的稳健代理，进 data_flags 用于低流动性警示
+    dollar_vol_ma20 = ma([c * v for c, v in zip(closes, vols)], 20)
 
     wcloses = [w["c"] for w in to_weekly(bars)]
     # 最后一根日线非周五 => 当前周线尚未收盘，周线指标含半根
@@ -113,6 +116,7 @@ def analyze_symbol(bars):
         "structure_30d": {
             "ret_30bars": pct_return(closes, STRUCT_WINDOW),
             "range_position_pct": pos,
+            "dist_to_30d_high_pct": dist_to_30d_high,
             "dist_to_52w_high_pct": round((last / high_52w - 1) * 100, 2) if high_52w else None,
             # 高点回看实际根数；<252 说明历史不足一年，52w 口径名不副实，需谨慎解读
             "high_lookback_bars": high_52w_bars,
@@ -126,6 +130,7 @@ def analyze_symbol(bars):
             "ma50": vol_ma50,
             "ratio_vs_ma20": round(vols[-1] / vol_ma20, 2) if vol_ma20 else None,
             "ratio_vs_ma50": round(vols[-1] / vol_ma50, 2) if vol_ma50 else None,
+            "dollar_vol_ma20": round(dollar_vol_ma20, 0) if dollar_vol_ma20 else None,
             "avg_ratio_5d": volume_ratio_ma(vols, 5, 20),
             "up_down_vol_ratio": up_day_volume_ratio(closes, vols, 10),
             "vol_trend_10d": volume_trend_direction(vols, 10),
@@ -143,11 +148,18 @@ def analyze_symbol(bars):
 
 
 def _weekly_bear(wcloses):
-    """周线均线空头排列：MA5<=MA10<=MA20<=MA30。"""
+    """周线均线空头排列：MA5<MA10<MA20<MA30 且有足够间距。
+
+    用严格 `<` 而非 `<=`：横盘时四条均线近乎相等，`<=` 会被浮点相等/微噪触发，
+    误判空头排列并触发否决（封顶 50）。再加间距门槛——MA5→MA30 跨度须 ≥ MA30 的
+    1%，否则视为均线缠绕的横盘，而非真正的空头排列。
+    """
     m5, m10, m20, m30 = ma(wcloses, 5), ma(wcloses, 10), ma(wcloses, 20), ma(wcloses, 30)
     if None in (m5, m10, m20, m30):
         return None
-    return m5 <= m10 <= m20 <= m30
+    strictly_bear = m5 < m10 < m20 < m30
+    meaningful = m30 > 0 and (m30 - m5) / m30 >= 0.01
+    return strictly_bear and meaningful
 
 
 def relative_strength(sym_ret, bench_ret):
@@ -186,6 +198,14 @@ def build_result(symbols, bars, feed, adjustment, feed_note=None):
         analyses[sym] = analyze_symbol(sb) if sb else {"error": "无数据返回"}
 
     benches = {b: analyses.get(b, {}).get("returns_pct", {}) for b in ("SPY", "QQQ")}
+    # 大盘 regime：SPY 跌破自身 200 日线 → 全局 risk-off（alpha 在此反转，见
+    # backtest_robustness）。仅 SPY 明确在 MA200 下方时为 True；above=True 或历史
+    # 不足(None) → None（不触发市场闸门）。点时点、无未来函数（用同一切片的 SPY）。
+    spy_a = analyses.get("SPY")
+    spy_above200 = spy_a.get("ma", {}).get("above_MA200") if isinstance(spy_a, dict) else None
+    market_risk_off = True if spy_above200 is False else None
+    if market_risk_off:
+        result["market_risk_off"] = True
     for sym, a in analyses.items():
         if "error" not in a:
             a["relative_strength_pct"] = {
@@ -193,7 +213,7 @@ def build_result(symbols, bars, feed, adjustment, feed_note=None):
                 for bench in ("SPY", "QQQ") if benches.get(bench)
             }
             # 相对强度就绪后再确定性打分（依赖 relative_strength_pct）
-            s = score(a)
+            s = score(a, market_risk_off)
             if s is not None:
                 a["score"] = s
         result["symbols"][sym] = a

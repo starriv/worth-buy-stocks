@@ -92,7 +92,7 @@ description: "Evaluate whether an individual stock is worth buying, holding, red
 | MACD | `macd.{DIF,DEA,hist,above_zero,bull,recent_cross}` | DIF>DEA 偏多、零轴上方偏多、金叉/死叉 |
 | RSI | `rsi.{RSI14,RSI6}` | >50 偏多、<50 偏空；注意顶背离（价新高 RSI 不新高） |
 | KDJ | `kdj.{K,D,J,bull,above_50}` | K>D 偏多、>50 偏多；J>100 短期过热 |
-| 量价 | `volume.{ratio_vs_ma20,avg_ratio_5d,up_down_vol_ratio,vol_trend_10d,obv}` | 单日量能比+近5日均量比+涨跌日量比+OBV 背离 |
+| 量价 | `volume.{ratio_vs_ma20,avg_ratio_5d,up_down_vol_ratio,vol_trend_10d,obv,dollar_vol_ma20}` | 单日量能比+近5日均量比+涨跌日量比+OBV 背离+20日均成交额（流动性） |
 | 周线 | `weekly.{MA5..MA30,macd,bearish_alignment,last_week_partial}` | 空头排列判定、`last_week_partial` 为 true 时周线未收盘需标记 |
 | 趋势 | `ma.{MA60,MA200,above_MA60,MA60_rising,above_MA200,MA200_rising}` | null=历史不足/无法确认 |
 | 动量 | `momentum.{risk_adj_6m,m12_1_pct}` | 风险调整动量 + 12-1 动量（跳过最近一月） |
@@ -116,6 +116,7 @@ ADX 解读要点（脚本字段 `trend_quality.adx.{ADX,plus_DI,minus_DI,trend_s
 1. 200 日线：`above_MA200=false` 且 `MA200_rising=false` → risk-off
 2. MA60：`above_MA60=false` → 趋势走弱
 3. 周线空头排列：`weekly.bearish_alignment=true`
+4. **大盘 regime**：SPY 自身跌破 200 日线 → 全局 risk-off → 所有标的封顶 65（禁新开「是」，最高「观察」）。回测显示该 regime 下排名分 IC 反转为负，高分不可信；`build_result` 由同切片 SPY 推导并写入 `result.market_risk_off`。
 
 **确认层（由 `score.confirmation` 给出）：**
 4. 技术确认：MACD/RSI/KDJ 多数偏多，无明显死叉或转弱。`confirmation.ok=false` 时，原本可能的 `是` 封顶为 `观察`。
@@ -127,16 +128,22 @@ ADX 解读要点（脚本字段 `trend_quality.adx.{ADX,plus_DI,minus_DI,trend_s
 
 评分**不靠模型主观判断**：`scripts/scoring.py` 是确定性多因子引擎，分数随 `indicators.py` 输出写在每个 symbol 的 `score` 块里（`build_result` 自动计算）。**直接采用 `score.composite` 与 `score.verdict`，不要自行重算或心算评分**；模型的职责是用关键证据解释该分数。脚本失败 / 字段缺失时该项记 `无法确认`。
 
-权重**经回测校准**（`backtest_factor_ic.py` / `backtest_score.py`）：逐因子 IC 显示只有**风险调整动量(IC≈0.10)** 与**相对强度(≈0.06)** 在 3 个月前瞻稳定为正；trend/trend_quality/technical/volume 的 IC≈0，掺入只会稀释信号。故排名分只用这两个真因子，其余各归其位（trend→否决层、technical/volume→确认）。校准后分桶前瞻收益单调、五分位多空价差约 +4%/3 月（含幸存者偏差，偏乐观）。**重要局限：edge 只在约 3 个月维度，1 个月维度无预测力——本评分是持仓/方向工具，不是择时工具。**
+权重**经回测校准**（`backtest_factor_ic.py` / `backtest_score.py` / `backtest_robustness.py`，2020-07→2026-06、57 期、**含 2022 熊市**、篮子纳入已退市票降幸存者偏差）：3 个月前瞻逐因子 IC 为**风险调整动量(≈0.042)** ≈ **相对强度(≈0.043)** > **效率比(≈0.027)** ≫ technical/volume(负)。三因子接近且偏弱（早期 24 期牛市样本曾显示 momentum≈0.087，属过拟合）；动量与相对强度截面相关 ≈0.84（高度共线），效率比近正交故仍取小权重纳入。全样本 composite 63 日 IC ≈+0.046、五分位多空仅 +0.4%/3 月。
+
+**两条必须随分数一起解读的实证局限：**
+- **edge 是 regime 条件的**（最关键）：risk-on（SPY>MA200）3 月 IC ≈+0.099(t≈2.05)、五分位多空 **+2.35%**；risk-off（SPY<MA200）IC ≈**−0.097**、多空 **−0.49%**——**熊市里 edge 反转为负**（动量崩溃）。这正是风险否决层封顶的理由。含 2022 后「≥75 是」桶不再单调领先（60–75「观察」桶反而更高），**高分 ≠ 高确定性**。
+- **只在约 3 个月维度有方向性，1 个月维度 IC≈0**——是持仓/方向工具，不是择时工具。
+
+数字仍含残余幸存者偏差，偏乐观；看方向与 regime 条件，不要当作可兑现 alpha。
 
 `score` 块字段：
 
 - `composite`（0–100）：ALPHA 因子加权后、再经风险否决封顶的最终分。`raw_composite` 为封顶前原始分。
-- `factor_breakdown`：ALPHA 因子的 `score_pct` / `points` / `weight`。权重为 **风险调整动量 60 · 相对强度 40**；缺失因子按可用权重重归一（不会无脑扣到 0）。
+- `factor_breakdown`：ALPHA 因子的 `score_pct` / `points` / `weight`。权重为 **风险调整动量 55 · 相对强度 35 · 效率比 10**；缺失因子按可用权重重归一（不会无脑扣到 0）。
 - `confirmation`：`{technical_pct, volume_pct, trend_quality_pct, ok}`——技术/量价/趋势质量不进排名分；`ok` 由技术确认决定，`ok=false` 时把本可成立的「是」封顶为「观察」。`volume_pct` 与 `trend_quality_pct` 用于解释风险，不直接改变 verdict。
-- `risk_gates`：触发的风险否决原因（空数组表示无）。否决层封顶规则：跌破下行 200 日线 → 封顶 55；仅跌破 200 日线 → 70；周线空头排列 → 50；跌破 MA60 → 65。trend（MA200/MA60/周线）的价值集中在此，而非排名加权。
+- `risk_gates`：触发的风险否决原因（空数组表示无）。否决层封顶规则：跌破下行 200 日线 → 封顶 55；仅跌破 200 日线 → 70；周线空头排列 → 50；跌破 MA60 → 65；**大盘 risk-off（SPY 跌破 200 日线）→ 65**。trend（MA200/MA60/周线）与市场 regime 的价值集中在此，而非排名加权。回测验证：加市场闸门后五分位多空价差 63d +0.39%→+0.70%、21d −0.17%→+0.05%，买入队列改善、无下行（仅在 alpha 已为负的 risk-off 封顶）。
 - `suggested_position_pct`：反波动率仓位建议（`目标年化波动 20% / 实现波动 × 信号强度`，上限 100%）——仅作参考，不下单。
-- `data_flags`：数据不足导致的因子缺失/重归一说明。
+- `data_flags`：数据不足导致的因子缺失/重归一说明；以及**低流动性警示**（`volume.dollar_vol_ma20` 低于 $5M 时触发——评分以大盘股校准，对低流动性标的迁移性弱，仓位与结论需谨慎；仅警示不封顶）。
 
 评级映射（由引擎给出，模型照用）：
 
@@ -182,7 +189,7 @@ ADX 解读要点（脚本字段 `trend_quality.adx.{ADX,plus_DI,minus_DI,trend_s
 
 **评分拆解**
 
-直接引用 `score.factor_breakdown` 的 ALPHA 因子得分（风险调整动量、相对强度）与各自权重，给出 `composite/100` 与 `raw_composite`；若 `risk_gates` 非空，列出否决原因并说明已封顶。再列出 `confirmation.technical_pct/volume_pct/trend_quality_pct` 与 `suggested_position_pct`（反波动率仓位建议，仅参考）。**分数照搬脚本，不自行重算。**
+直接引用 `score.factor_breakdown` 的 ALPHA 因子得分（风险调整动量、相对强度、效率比）与各自权重，给出 `composite/100` 与 `raw_composite`；若 `risk_gates` 非空，列出否决原因并说明已封顶。再列出 `confirmation.technical_pct/volume_pct/trend_quality_pct` 与 `suggested_position_pct`（反波动率仓位建议，仅参考）。**分数照搬脚本，不自行重算。**
 
 **建议**
 

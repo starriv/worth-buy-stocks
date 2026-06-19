@@ -16,12 +16,13 @@ sys.path.insert(0, __import__("os").path.dirname(__file__))
 from fetching import _fetch_feed, FeedLimitError  # noqa: E402
 from metrics import ma  # noqa: E402
 from backtest_common import (  # noqa: E402
-    UNIVERSE, WARMUP, HISTORY_DAYS, load_panel, spearman, mean_t, quintile_spread,
+    UNIVERSE, DELISTED, WARMUP, HISTORY_DAYS, load_panel, spearman, mean_t, quintile_spread,
 )
 import datetime  # noqa: E402
 
-# 2023–2026 间已退市 / 被并购 / 暴雷的票（用于幸存者偏差探针）
-DELISTED_PROBE = ["FRC", "SIVB", "SBNY", "ATVI", "TWTR", "CREE", "ABMD", "PXD", "SPLK", "VMW"]
+# 仍未纳入篮子的死亡名字（残余幸存者缺口）：SBNY 数据存疑、CREE 更名 WOLF，
+# 另含本轮未加的破产票（Bed Bath、WeWork、Rite Aid）。DELISTED 已纳入的不再探针。
+RESIDUAL_PROBE = ["SBNY", "CREE", "BBBY", "WE", "RAD"]
 
 
 def _regime_map(spy_bars):
@@ -86,19 +87,20 @@ def _survivorship_probe(feed, adjustment, timeout):
     end = datetime.date.today().isoformat()
     start = (datetime.date.today() - datetime.timedelta(days=HISTORY_DAYS)).isoformat()
     print("\n" + "=" * 72)
-    print("硬化 3：幸存者偏差探针（2023–26 已退市/并购票，篮子里缺席）")
+    print("硬化 3：幸存者偏差探针（篮子已纳入死亡名字 + 残余缺口）")
     print("=" * 72)
+    print(f"   已纳入篮子的死亡票（降偏差）: {', '.join(DELISTED)}")
     served, missing = [], []
-    for sym in DELISTED_PROBE:
+    for sym in RESIDUAL_PROBE:
         try:
             n = len(_fetch_feed([sym], start, end, feed, adjustment, 10000, timeout).get(sym, []))
         except (FeedLimitError, RuntimeError):
             n = 0
         (served if n > 0 else missing).append((sym, n))
-    print(f"   可拉到数据: {', '.join(f'{s}({n})' for s, n in served) or '无'}")
-    print(f"   完全缺失  : {', '.join(s for s, _ in missing) or '无'}")
-    print("   解读：这些票多数在期内暴跌/归零/被并购。它们不在评分篮子里，")
-    print("        意味着回测只统计了「活下来的赢家」，真实 edge 被系统性高估。")
+    print(f"   残余缺口·可拉到: {', '.join(f'{s}({n})' for s, n in served) or '无'}")
+    print(f"   残余缺口·全缺失: {', '.join(s for s, _ in missing) or '无'}")
+    print("   解读：DELISTED 已让篮子接近「窗口起点的大盘」，存活期会被打分、前瞻收益含")
+    print("        暴跌/收购退出。残余缺口（数据存疑/未列出的破产票）说明偏差降低但未根除。")
 
 
 def main():

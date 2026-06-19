@@ -30,13 +30,18 @@ def run(feed, adjustment, timeout):
 
     obs = {h: [] for h in HORIZONS}        # (composite, fwd_ret)
     ic_by_date = {h: [] for h in HORIZONS}
+    # confirmation gate A/B：买入候选（composite≥75 且无风险否决）按 confirmation.ok 拆分
+    gate_ab = {h: {"ok": [], "blocked": []} for h in HORIZONS}
     for ti in rebal_idx:
         symbols = panel.scores_at(panel.calendar[ti])
         per_date = {h: ([], []) for h in HORIZONS}
         for s in UNIVERSE:
-            comp = (symbols.get(s, {}).get("score") or {}).get("composite")
+            sc = symbols.get(s, {}).get("score") or {}
+            comp = sc.get("composite")
             if comp is None:
                 continue
+            buy_candidate = comp >= 75 and not sc.get("risk_gates")
+            bucket = "ok" if (sc.get("confirmation") or {}).get("ok") else "blocked"
             for h in HORIZONS:
                 fwd = panel.fwd_return_pct(s, ti, h)
                 if fwd is None:
@@ -44,11 +49,14 @@ def run(feed, adjustment, timeout):
                 obs[h].append((comp, fwd))
                 per_date[h][0].append(comp)
                 per_date[h][1].append(fwd)
+                if buy_candidate:
+                    gate_ab[h][bucket].append(fwd)
         for h in HORIZONS:
             ic = spearman(*per_date[h])
             if ic is not None:
                 ic_by_date[h].append(ic)
     _report(obs, ic_by_date)
+    _report_gate_ab(gate_ab)
 
 
 def _report(obs, ic_by_date):
@@ -75,6 +83,36 @@ def _report(obs, ic_by_date):
             print(f"   Spearman 截面 IC: 均值 {mic:+.3f}  t≈{t:+.2f}  "
                   f"IC>0 占比 {pos:.0f}%  ({ndays} 期)")
     print("\n注：篮子含幸存者偏差，真实 edge 偏乐观；看方向与单调性而非绝对收益。")
+
+
+def _mean(xs):
+    return sum(xs) / len(xs) if xs else None
+
+
+def _report_gate_ab(gate_ab):
+    """检验 confirmation gate 是否真有用：买入候选里 ok 组前瞻收益应 ≥ blocked 组。
+
+    若 blocked（技术未确认、被封顶为「观察」）组收益反而不低于 ok 组，说明 gate
+    在砍真买点而非过滤差买点——这正是 scoring.py:_f_technical 那层 overlay 的实战检验。
+    """
+    print("\n" + "=" * 60)
+    print("confirmation gate A/B（composite≥75 且无否决的买入候选）")
+    print("=" * 60)
+    for h in sorted(gate_ab):
+        ok, blk = gate_ab[h]["ok"], gate_ab[h]["blocked"]
+        m_ok, m_blk = _mean(ok), _mean(blk)
+        print(f"\n── 前瞻 {h} 交易日 ──")
+        print(f"   confirmation.ok=True  (放行) 平均前瞻收益 "
+              f"{m_ok:+.2f}%  (n={len(ok)})" if m_ok is not None else
+              "   confirmation.ok=True  (放行) 无样本")
+        print(f"   confirmation.ok=False (封顶) 平均前瞻收益 "
+              f"{m_blk:+.2f}%  (n={len(blk)})" if m_blk is not None else
+              "   confirmation.ok=False (封顶) 无样本")
+        if m_ok is not None and m_blk is not None:
+            verdict = ("gate 有效（放行组更优）" if m_ok > m_blk
+                       else "gate 存疑（封顶组不差，可能在砍真买点）")
+            print(f"   差值 {m_ok - m_blk:+.2f}% → {verdict}")
+    print("\n注：样本量通常很小（买入候选稀少），仅看方向参考；需多次/长窗口累积。")
 
 
 def main():

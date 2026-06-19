@@ -256,13 +256,13 @@ def trend_regression(closes, window=63):
 def momentum_12_1(closes):
     """学术口径 12-1 动量：t-252 到 t-21 的收益（跳过最近一月，避开短期反转）。
 
-    历史不足 253 根时退化为「最早可得 到 t-21」的近似，并不返回 None，
-    以便新上市/历史短的标的仍有动量读数（解读时结合 bars_count）。
+    历史不足 253 根时返回 None，而非用 closes[0] 近似——后者会把窗口悄悄
+    变成「全历史-1」，得到与真 12-1 动量不可比的读数，污染跨股截面排序/IC。
+    历史短的标的应缺这一读数（_f_momentum 会按可用权重重归一），不应给假值。
     """
-    if len(closes) <= 21:
+    if len(closes) < 253:
         return None
-    recent = closes[-21]
-    base = closes[-253] if len(closes) >= 253 else closes[0]
+    recent, base = closes[-21], closes[-253]
     if base <= 0:
         return None
     return round((recent / base - 1) * 100, 2)

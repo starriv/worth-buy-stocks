@@ -63,11 +63,16 @@ class TestMomentum121(unittest.TestCase):
         expect = round((recent / base - 1) * 100, 2)
         self.assertEqual(M.momentum_12_1(closes), expect)
 
-    def test_short_history_fallback(self):
-        # < 253 根：退化为 base=closes[0]
+    def test_short_history_returns_none(self):
+        # < 253 根：返回 None（不再用 closes[0] 近似，避免跨股不可比）
         closes = [float(i) for i in range(1, 60)]
+        self.assertIsNone(M.momentum_12_1(closes))
+
+    def test_exactly_253_bars_computes(self):
+        # 恰好 253 根：base=closes[-253]=closes[0]，应可算
+        closes = [float(i) for i in range(1, 254)]
         self.assertEqual(M.momentum_12_1(closes),
-                         round((closes[-21] / closes[0] - 1) * 100, 2))
+                         round((closes[-21] / closes[-253] - 1) * 100, 2))
 
 
 class TestATR(unittest.TestCase):

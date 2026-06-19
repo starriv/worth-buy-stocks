@@ -4,12 +4,19 @@
 设计目标：贴近真实量化基金逻辑——规则化、可复现、风险调整、带否决层与仓位建议。
 模型的职责由「主观打分」变为「解释本引擎给出的分数」。纯函数，仅读分析字典。
 
-权重经逐因子 IC 回测校准（见 backtest_factor_ic.py）：3 个月前瞻 IC 排序为
-momentum(0.10) > rel_strength(0.06) > trend(0.05) ≫ trend_quality / technical /
-volume(≈0 或负)。据此分工：
+权重经逐因子 IC 回测校准（见 backtest_factor_ic.py）。3 个月前瞻 IC（2020-07→
+2026-06、57 期、含 2022 熊市、篮子纳入已退市票降幸存者偏差，仅看相对排序与符号）：
+momentum(≈0.042) ≈ rel_strength(≈0.043) > efficiency(≈0.027) ≫ technical /
+volume(负)。三个 ALPHA 因子在 honest 样本里接近且偏弱（早期 24 期牛市样本曾显示
+momentum≈0.087，是过拟合）；因高度共线，55/35 的 momentum/rel 拆分对 composite
+影响极小，故维持权重不逐样本重调（避免 curve-fit）。据此分工：
 
   ALPHA 加权（决定排名分 composite，缺失按可用权重重归一）：
-    momentum 60 · rel_strength 40（仅这两个因子 IC 稳定为正且够强）
+    momentum 55 · rel_strength 35 · efficiency 10
+    momentum 与 rel_strength 截面相关 ≈0.84（高度共线，实为 ~1.2 因子）；
+    efficiency（Kaufman 效率比）与 momentum 相关仅 ≈0.08——近正交且 IC 为正，
+    加进 composite 后整体 63 日 IC 0.072→0.076（单调，eff20 至 0.078）。取保守
+    权重 10 拿增量、不把权重 curve-fit 到 24 个噪声样本里最优的 20。
   风险否决层（veto / 封顶，模拟基金 risk-off 覆盖；trend 的价值在此而非排名）：
     跌破下行 200 日线 → 55；仅跌破 200 日线 → 70；周线空头 → 50；跌破 MA60 → 65。
   确认 overlay（technical / volume，IC≈0，不进加权）：
@@ -17,14 +24,24 @@ volume(≈0 或负)。据此分工：
 
 仓位建议（反波动率）：目标年化波动 / 实现波动 × 信号强度，上限 100%。
 
-历史教训：早期等掺入 technical/volume 的六因子 composite，IC(0.082) 反而低于
-momentum 单因子(0.102)——弱因子稀释强信号。本版按数据把它们移出排名分。
+**最关键的实证局限——edge 是 regime 条件的**（backtest_robustness regime 拆分，
+63 日非重叠）：risk-on（SPY>MA200）IC ≈+0.099、t≈2.05、五分位多空 +2.35%，真实
+且接近显著；risk-off（SPY<MA200）IC ≈−0.097、五分位多空 −0.49%，**edge 反转为负**
+（动量在熊市崩溃）。全样本 IC +0.046 是两者混合。这正是 risk_gates 否决层（SPY/
+个股跌破 MA200 时封顶）存在的理由——alpha 恰在 risk-off 失效。含 2022 后「≥75 是」
+桶不再单调领先（60–75 桶反而更高），说明高分≠高确定性，须配合 regime 与否决层解读。
+
+历史教训：早期等掺入 technical/volume 的六因子 composite，IC 反而低于强因子单打
+——弱因子稀释强信号。本版按数据只保留 IC 为正且彼此不过度共线的因子进排名分。
+注：risk_adj_6m 当前口径与标准 Sharpe(mean/std×√252) 截面相关 0.999、IC 仅差
+0.003，已验证开方口径不影响排名，故不改。
 """
 import math
 
-# ALPHA 因子权重（详见模块 docstring）：仅 momentum / rel_strength 的 IC 稳定为正。
-ALPHA_WEIGHTS = {"momentum": 60, "rel_strength": 40}
+# ALPHA 因子权重（详见模块 docstring）。efficiency 为近正交的第三因子（小权重）。
+ALPHA_WEIGHTS = {"momentum": 55, "rel_strength": 35, "efficiency": 10}
 TARGET_VOL_PCT = 20.0  # 反波动率仓位的目标年化波动
+LOW_LIQUIDITY_USD = 5_000_000  # 20 日均成交额低于此值 → 低流动性警示（仅 flag，不封顶）
 
 
 def _logistic(x, x0, k):
@@ -73,16 +90,29 @@ def _f_momentum(a):
 
 def _f_rel_strength(a):
     rs = a.get("relative_strength_pct", {})
-    vals = []
-    for bench in ("SPY", "QQQ"):
-        b = rs.get(bench) or {}
-        for k in ("r3m_63d", "r6m_126d"):
-            if b.get(k) is not None:
-                vals.append(b[k])
-    if not vals:
+    # 每个视界内对两个基准取较弱者（须同时跑赢 SPY/QQQ，保留「对最差基准负责」），
+    # 再对 3m/6m 两个视界取均值。旧版对 4 个读数全局取 min，会把不同视界混在一起、
+    # 让单一最差读数把整体压到地板，过度惩罚且丢失视界信息。
+    horizon_vals = []
+    for k in ("r3m_63d", "r6m_126d"):
+        per_bench = [(rs.get(bench) or {}).get(k) for bench in ("SPY", "QQQ")]
+        per_bench = [v for v in per_bench if v is not None]
+        if per_bench:
+            horizon_vals.append(min(per_bench))
+    if not horizon_vals:
         return None
-    # 保守取最弱的超额收益（对最差基准负责）
-    return _logistic(min(vals), 0.0, 0.12)
+    return _logistic(sum(horizon_vals) / len(horizon_vals), 0.0, 0.12)
+
+
+def _f_efficiency(a):
+    """ALPHA 第三因子：Kaufman 效率比（趋势"干净度"），∈[0,1]。
+
+    只用 efficiency_30 单一原语，不含 trend_quality 里 ADX/回归/回撤等噪声成分——
+    回测中正是裸 efficiency（IC≈0.063、与 momentum 相关≈0.08）才是有效的正交信号，
+    混进 trend_quality 的混合反而被稀释到 IC≈0。缺失返回 None（按可用权重重归一）。
+    """
+    eff = (a.get("trend_quality") or {}).get("efficiency_30")
+    return min(max(eff, 0.0), 1.0) if eff is not None else None
 
 
 def _f_trend_quality(a):
@@ -176,13 +206,20 @@ def _f_volume_exec(a):
 FACTOR_FNS = {
     "momentum": _f_momentum,
     "rel_strength": _f_rel_strength,
+    "efficiency": _f_efficiency,
     "trend": _f_trend,
     "trend_quality": _f_trend_quality,
 }
 
 
-def _gates(a):
-    """风险否决层：返回 (封顶分, [触发原因])。"""
+def _gates(a, market_risk_off=None):
+    """风险否决层：返回 (封顶分, [触发原因])。
+
+    个股闸门看自身均线结构；市场闸门看大盘（SPY）regime——
+    `market_risk_off=True`（SPY 跌破自身 200 日线）时额外封顶到 65：回测显示该
+    regime 下排名分 IC 反转为负（≈−0.10），高分不可信，故禁新开「是」、最高「观察」，
+    符合趋势跟随「大盘下行不开新多」。仅 True 触发；None/False（含历史不足）不封。
+    """
     ma = a.get("ma", {})
     cap, reasons = 100, []
     above200, rising200 = ma.get("above_MA200"), ma.get("MA200_rising")
@@ -198,6 +235,9 @@ def _gates(a):
     if ma.get("above_MA60") is False:
         cap = min(cap, 65)
         reasons.append("价格跌破 MA60")
+    if market_risk_off is True:
+        cap = min(cap, 65)
+        reasons.append("大盘 risk-off（SPY 跌破 200 日线）——该 regime 排名分 edge 反转，新开仓封顶为「观察」")
     return cap, reasons
 
 
@@ -208,6 +248,12 @@ def _flags(a, alpha_subs):
     for k, s in alpha_subs.items():
         if s is None:
             flags.append(f"因子 {k} 数据不足，未计入加权")
+    adv = (a.get("volume") or {}).get("dollar_vol_ma20")
+    if adv is not None and adv < LOW_LIQUIDITY_USD:
+        flags.append(
+            f"20 日均成交额约 ${adv / 1e6:.1f}M，低于 ${LOW_LIQUIDITY_USD / 1e6:.0f}M 流动性门槛——"
+            "滑点/冲击成本偏高，仓位与结论需谨慎（评分以大盘股校准，对低流动性标的迁移性弱）"
+        )
     return flags
 
 
@@ -220,8 +266,12 @@ def _position_pct(a, composite):
     return round(size * 100, 1)
 
 
-def score(a):
-    """对单个 analyze_symbol 结果打分。a 含 error 时原样返回。"""
+def score(a, market_risk_off=None):
+    """对单个 analyze_symbol 结果打分。a 含 error 时原样返回。
+
+    market_risk_off：大盘 regime（SPY 是否跌破自身 200 日线）。由 build_result 传入；
+    单票直调时默认 None（不启用市场闸门，向后兼容）。
+    """
     if not isinstance(a, dict) or "error" in a:
         return None
 
@@ -240,7 +290,7 @@ def score(a):
             den += w
     raw = round(num / den * 100, 1) if den else None  # 按可用权重重归一到 0-100
 
-    cap, gate_reasons = _gates(a)
+    cap, gate_reasons = _gates(a, market_risk_off)
     composite = round(min(raw, cap), 1) if raw is not None else None
 
     # 确认 overlay（technical / volume / trend_quality，IC≈0：不加分，只在转弱时封顶买入）

@@ -119,6 +119,16 @@ class TestWeekly(unittest.TestCase):
         self.assertTrue(I._weekly_bear([float(x) for x in range(40, 0, -1)]))
         self.assertFalse(I._weekly_bear([float(x) for x in range(1, 41)]))
 
+    def test_flat_market_not_bearish(self):
+        # 横盘：四条均线近乎相等，严格 < + 间距门槛应判 False（不误触发否决）
+        flat = [100.0 + (0.01 if i % 2 else -0.01) for i in range(40)]
+        self.assertFalse(I._weekly_bear(flat))
+
+    def test_shallow_decline_below_margin_not_bearish(self):
+        # 极缓下行，MA5→MA30 跨度 < 1%：视为缠绕横盘，不算空头排列
+        gentle = [100.0 - i * 0.001 for i in range(40)]
+        self.assertFalse(I._weekly_bear(gentle))
+
 
 class TestAnalyzeEdges(unittest.TestCase):
     def test_ma60_unknown_is_none_not_false(self):
