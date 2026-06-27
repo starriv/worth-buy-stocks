@@ -7,8 +7,11 @@
 import json
 import os
 import sys
+import tempfile
 import unittest
 from datetime import date, timedelta
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -68,6 +71,9 @@ class TestRSI(unittest.TestCase):
 
     def test_insufficient_is_none(self):
         self.assertIsNone(I.rsi([1, 2, 3], 14))
+
+    def test_flat_is_neutral(self):
+        self.assertEqual(I.rsi([10.0] * 30, 14), 50.0)
 
 
 class TestKDJ(unittest.TestCase):
@@ -156,6 +162,14 @@ class TestAnalyzeEdges(unittest.TestCase):
 
 
 class TestBuildResultInput(unittest.TestCase):
+    def test_symbols_with_benchmarks_appends_when_available(self):
+        bars = {"AAPL": [], "SPY": [], "QQQ": []}
+        self.assertEqual(I._symbols_with_benchmarks(["aapl"], bars), ["AAPL", "SPY", "QQQ"])
+
+    def test_symbols_with_benchmarks_offline_does_not_invent_missing_data(self):
+        bars = {"AAPL": []}
+        self.assertEqual(I._symbols_with_benchmarks(["aapl"], bars), ["AAPL"])
+
     def test_end_to_end_offline(self):
         closes = [float(x) for x in range(50, 250)]
         payload = {"bars": {"AAPL": _bars(closes), "SPY": _bars(closes), "QQQ": _bars(closes)}}
@@ -169,6 +183,108 @@ class TestBuildResultInput(unittest.TestCase):
     def test_missing_symbol_errors(self):
         res = I.build_result(["MISSING"], {}, "iex", "split")
         self.assertIn("error", res["symbols"]["MISSING"])
+
+    def test_load_llm_context_file(self):
+        payload = {"symbols": {"aapl": {"data_trust": "suspect"}}}
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
+            json.dump(payload, f)
+            path = f.name
+        try:
+            ctx = I._load_llm_context(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(ctx, {"AAPL": {"data_trust": "suspect"}})
+
+    def test_load_account_context_file(self):
+        payload = {
+            "account": {"equity": "100000", "cash": "20000", "long_market_value": "75000"},
+            "positions": [{"symbol": "aapl", "qty": "5", "market_value": "1000"}],
+        }
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
+            json.dump(payload, f)
+            path = f.name
+        try:
+            ctx = I._load_account_context(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(ctx["status"], "ok")
+        self.assertEqual(ctx["account"]["cash_pct"], 20.0)
+        self.assertEqual(ctx["positions"]["AAPL"]["market_value"], 1000.0)
+
+    def test_load_finnhub_context_file(self):
+        payload = {
+            "symbols": {
+                "aapl": {
+                    "quote": {"current_price": 123.45},
+                    "news": [{"headline": "news"}],
+                    "data_flags": [],
+                }
+            }
+        }
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
+            json.dump(payload, f)
+            path = f.name
+        try:
+            ctx = I._load_finnhub_context(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(ctx["status"], "ok")
+        self.assertEqual(ctx["symbols"]["AAPL"]["quote"]["current_price"], 123.45)
+
+    def test_finnhub_auto_without_key_does_not_fetch(self):
+        args = SimpleNamespace(
+            finnhub_context_file=None,
+            finnhub_context="auto",
+            input=None,
+            finnhub_news_days=30,
+            finnhub_earnings_days=14,
+            finnhub_timeout=15,
+        )
+        missing_env = os.path.join(tempfile.gettempdir(), "wbs_missing_test.env")
+        with patch.dict(os.environ, {"WORTH_BUY_STOCKS_ENV_FILE": missing_env}, clear=True), \
+                patch("indicators.fetch_finnhub_context") as fetch:
+            self.assertIsNone(I._finnhub_context_from_args(args, ["AAPL"]))
+        fetch.assert_not_called()
+
+    def test_build_result_threads_account_context(self):
+        closes = [100.0 * (1.004 ** i) for i in range(260)]
+        flat = [400.0 * (1.0005 ** i) for i in range(260)]
+        bars = {"WIN": _bars(closes), "SPY": _bars(flat), "QQQ": _bars(flat)}
+        account_context = I.normalize_account_context({
+            "account": {"equity": "100000", "cash": "10000", "long_market_value": "90000"},
+            "positions": [{"symbol": "WIN", "qty": "1000", "market_value": "50000"}],
+        })
+        res = I.build_result(
+            ["WIN", "SPY", "QQQ"], bars, "iex", "split", account_context=account_context
+        )
+        self.assertEqual(res["account_context"]["status"], "ok")
+        overlay = res["symbols"]["WIN"]["score"]["account_overlay"]
+        self.assertEqual(overlay["holding_status"], "held")
+        self.assertGreater(overlay["current_position_pct"], 0)
+
+    def test_build_result_threads_finnhub_context(self):
+        closes = [100.0 * (1.004 ** i) for i in range(260)]
+        flat = [400.0 * (1.0005 ** i) for i in range(260)]
+        bars = {"WIN": _bars(closes), "SPY": _bars(flat), "QQQ": _bars(flat)}
+        finnhub_context = I.normalize_finnhub_context({
+            "symbols": {
+                "WIN": {
+                    "status": "ok",
+                    "quote": {"current_price": 123.45},
+                    "profile": {"name": "Winner Inc"},
+                    "data_flags": ["quote stale"],
+                }
+            }
+        })
+        res = I.build_result(
+            ["WIN", "SPY", "QQQ"], bars, "iex", "split", finnhub_context=finnhub_context
+        )
+        self.assertEqual(res["supplemental"]["finnhub"]["status"], "ok")
+        self.assertIn("WIN: quote stale", res["supplemental"]["finnhub"]["data_flags"])
+        self.assertEqual(
+            res["symbols"]["WIN"]["supplemental"]["finnhub"]["quote"]["current_price"],
+            123.45,
+        )
 
 
 if __name__ == "__main__":

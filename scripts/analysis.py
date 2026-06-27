@@ -3,17 +3,22 @@
 
 把 metrics.py 的原语组装成每个 symbol 的结构化结果，并计算相对强度。
 离线模式从 multi-bars 形状 JSON 读入，便于测试与不触网回放。
+
+build_result（跨票聚合 + 打分编排）已移至 pipeline.py；本模块只保留单票分析
+与相对强度原语，不再依赖 scoring / finnhub / portfolio。
 """
+from __future__ import annotations
+
 import datetime
 import json
 import sys
+from typing import Any
 
 from metrics import (
     adx, annualized_return, annualized_vol, atr, efficiency_ratio, kdj, ma, macd,
     max_drawdown, momentum_12_1, obv, pct_return, rsi, to_weekly, trend_regression,
     up_day_volume_ratio, volume_ratio_ma, volume_trend_direction,
 )
-from scoring import score
 
 # 交易日窗口（约数）：1/3/6 个月、52 周
 R1M, R3M, R6M = 21, 63, 126
@@ -24,7 +29,7 @@ MA60_SLOPE_LOOKBACK = 5    # MA60 方向：与 N 根前比较
 MA200_SLOPE_LOOKBACK = 21  # MA200 方向：与约一月前比较
 
 
-def analyze_symbol(bars):
+def analyze_symbol(bars: list[dict[str, Any]]) -> dict[str, Any]:
     closes = [b["c"] for b in bars]
     highs = [b["h"] for b in bars]
     lows = [b["l"] for b in bars]
@@ -147,7 +152,7 @@ def analyze_symbol(bars):
     }
 
 
-def _weekly_bear(wcloses):
+def _weekly_bear(wcloses: list[float]) -> bool | None:
     """周线均线空头排列：MA5<MA10<MA20<MA30 且有足够间距。
 
     用严格 `<` 而非 `<=`：横盘时四条均线近乎相等，`<=` 会被浮点相等/微噪触发，
@@ -162,15 +167,15 @@ def _weekly_bear(wcloses):
     return strictly_bear and meaningful
 
 
-def relative_strength(sym_ret, bench_ret):
-    out = {}
+def relative_strength(sym_ret: dict[str, Any], bench_ret: dict[str, Any]) -> dict[str, float | None]:
+    out: dict[str, float | None] = {}
     for k in ("r1m_21d", "r3m_63d", "r6m_126d"):
         a, b = sym_ret.get(k), bench_ret.get(k)
         out[k] = round(a - b, 2) if (a is not None and b is not None) else None
     return out
 
 
-def _load_input(path):
+def _load_input(path: str) -> dict[str, list[dict[str, Any]]]:
     """从文件/stdin 读取 multi-bars 形状 JSON（{"bars": {...}}），返回 {symbol: [bar,...]}。"""
     if path == "-":
         raw = sys.stdin.read()
@@ -181,40 +186,9 @@ def _load_input(path):
     bars = data.get("bars") if isinstance(data, dict) else None
     if not bars:
         raise RuntimeError("输入 JSON 缺少 bars 字段")
-    out = {}
+    out: dict[str, list[dict[str, Any]]] = {}
     for sym, blist in bars.items():
         bymt = {b["t"]: b for b in blist}
         out[sym] = [bymt[t] for t in sorted(bymt)]
     return out
 
-
-def build_result(symbols, bars, feed, adjustment, feed_note=None):
-    result = {"feed": feed, "adjustment": adjustment, "symbols": {}}
-    if feed_note:
-        result["feed_note"] = feed_note
-    analyses = {}
-    for sym in symbols:
-        sb = bars.get(sym)
-        analyses[sym] = analyze_symbol(sb) if sb else {"error": "无数据返回"}
-
-    benches = {b: analyses.get(b, {}).get("returns_pct", {}) for b in ("SPY", "QQQ")}
-    # 大盘 regime：SPY 跌破自身 200 日线 → 全局 risk-off（alpha 在此反转，见
-    # backtest_robustness）。仅 SPY 明确在 MA200 下方时为 True；above=True 或历史
-    # 不足(None) → None（不触发市场闸门）。点时点、无未来函数（用同一切片的 SPY）。
-    spy_a = analyses.get("SPY")
-    spy_above200 = spy_a.get("ma", {}).get("above_MA200") if isinstance(spy_a, dict) else None
-    market_risk_off = True if spy_above200 is False else None
-    if market_risk_off:
-        result["market_risk_off"] = True
-    for sym, a in analyses.items():
-        if "error" not in a:
-            a["relative_strength_pct"] = {
-                bench: relative_strength(a["returns_pct"], benches[bench])
-                for bench in ("SPY", "QQQ") if benches.get(bench)
-            }
-            # 相对强度就绪后再确定性打分（依赖 relative_strength_pct）
-            s = score(a, market_risk_off)
-            if s is not None:
-                a["score"] = s
-        result["symbols"][sym] = a
-    return result
