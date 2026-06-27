@@ -148,7 +148,7 @@ def main():
     # 自取模式参数（与 indicators.py 对齐）
     p.add_argument("--start", help="自取起始日；缺省按 --count 自动回推")
     p.add_argument("--end", help="自取结束日；缺省今天")
-    p.add_argument("--feed", default="iex")
+    p.add_argument("--feed", default="iex", help="Alpaca 数据源，默认 iex；无 SIP 权限不要用 sip")
     p.add_argument("--adjustment", default="split")
     p.add_argument("--limit", type=int, default=10000)
     p.add_argument("--timeout", type=int, default=30)

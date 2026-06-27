@@ -3,17 +3,19 @@
 > **理念：做趋势。** 只参与已被市场验证的方向，不猜底、不博反弹、不和趋势对抗。 抄底会错无数次，追高只会错一次
 
 通过多因子量化分析判断股票是否值得买入，买之前问一问防止冲动金融消费。
+脚本会在可用时只读 Alpaca 账户持仓，把当前敞口、成本和浮盈亏纳入建议，并输出参考入场价、保护性出场价和止盈价。Finnhub 可作为可选补充数据源，用于 quote/news/profile/earnings 核验和事件风险识别；其中新闻/财报只会生成降级候选，不会把标的加分或升级。
 
 ## 实现原理
 
 ```
 ALPHA 加权层 (排名分)  →  风险否决层 (封顶)  →  确认 overlay (不扣分)
-     momentum 60            MA200 下行 → 55      技术转弱时 "是" → "观察"
-     rel_strength 40        MA60 跌破 → 65
+     momentum 55            MA200 下行 → 55      技术转弱时 "是" → "观察"
+     rel_strength 35        MA60 跌破 → 65
+     efficiency 10
                             周线空头 → 50
 ```
 
-权重来自逐因子 IC 回测校准：仅**风险调整动量 (IC≈0.10)** 和**相对强度 (IC≈0.06)** 在 3 个月前瞻稳定为正。MACD/RSI/KDJ/量价等经典指标 IC≈0，不进排名分，只做确认。
+权重来自逐因子 IC 回测校准：风险调整动量、相对强度和趋势效率进入排名分。MACD/RSI/KDJ/量价等经典指标不进排名分，只做确认和风控解释。
 
 ## 使用示例
 
@@ -27,7 +29,7 @@ ALPHA 加权层 (排名分)  →  风险否决层 (封顶)  →  确认 overlay 
 
 ## 依赖
 
-仅支持美股，数据来源为 [Alpaca Markets](https://alpaca.markets/)，需先开户并配置 [Alpaca Skill](https://alpaca.markets/blog/alpaca-launches-skills-library-for-ai-agents/)。
+仅支持美股，主价量数据来源为 [Alpaca Markets](https://alpaca.markets/)，需先开户并配置 [Alpaca Skill](https://alpaca.markets/blog/alpaca-launches-skills-library-for-ai-agents/)。可选在 skill 根目录 `.env` 设置 `FINNHUB_API_KEY` 读取 Finnhub 补充上下文；Telegram 推送同样优先读取该 `.env`。
 
 ## 广告
 
