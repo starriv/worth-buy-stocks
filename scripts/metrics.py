@@ -38,7 +38,8 @@ def ema_series(values, n, seed="first"):
 def macd(closes, fast=12, slow=26, signal=9):
     """返回 DIF / DEA / 柱状(2*(DIF-DEA)) 的末值与最近交叉信息。
 
-    使用 SMA-seeded EMA 以缩短预热：~slow+signal+5 根即够（此前需 ~3×slow）。
+    三条 EMA 均用 SMA-seeded 初始化（前 N 根 SMA 做种子），将预热需求从
+    ~3×slow 降到 ~slow+signal+5 根。
     """
     min_bars = slow + signal + 5  # SMA seed 后仅需 DIF → DEA 的递推长度
     if len(closes) < min_bars:
@@ -46,7 +47,7 @@ def macd(closes, fast=12, slow=26, signal=9):
     ema_fast = ema_series(closes, fast, seed="sma")
     ema_slow = ema_series(closes, slow, seed="sma")
     dif = [f - s for f, s in zip(ema_fast, ema_slow)]
-    dea = ema_series(dif, signal)
+    dea = ema_series(dif, signal, seed="sma")
     hist = [2 * (d - e) for d, e in zip(dif, dea)]
     cross = _recent_cross(dif, dea, lookback=30)
     same_sign = len(hist) >= 2 and (hist[-1] >= 0) == (hist[-2] >= 0)
@@ -89,6 +90,8 @@ def rsi(closes, n=14):
     for i in range(n, len(gains)):
         avg_gain = (avg_gain * (n - 1) + gains[i]) / n
         avg_loss = (avg_loss * (n - 1) + losses[i]) / n
+    if avg_gain == 0 and avg_loss == 0:
+        return 50.0
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
@@ -182,6 +185,8 @@ def annualized_return(closes, window=126):
 
 def max_drawdown(closes, window=126):
     """窗口内最大回撤（负百分比；峰值到谷值的最深跌幅）。"""
+    if len(closes) < window:
+        return None
     seg = closes[-window:]
     if len(seg) < 2:
         return None
@@ -256,13 +261,14 @@ def trend_regression(closes, window=63):
 def momentum_12_1(closes):
     """学术口径 12-1 动量：t-252 到 t-21 的收益（跳过最近一月，避开短期反转）。
 
+    closes[-1] = P(t)，则 P(t-21) = closes[-22]、P(t-252) = closes[-253]。
     历史不足 253 根时返回 None，而非用 closes[0] 近似——后者会把窗口悄悄
     变成「全历史-1」，得到与真 12-1 动量不可比的读数，污染跨股截面排序/IC。
     历史短的标的应缺这一读数（_f_momentum 会按可用权重重归一），不应给假值。
     """
     if len(closes) < 253:
         return None
-    recent, base = closes[-21], closes[-253]
+    recent, base = closes[-22], closes[-253]
     if base <= 0:
         return None
     return round((recent / base - 1) * 100, 2)

@@ -25,6 +25,9 @@ class TestVolReturn(unittest.TestCase):
 
 
 class TestDrawdown(unittest.TestCase):
+    def test_short_history_is_none(self):
+        self.assertIsNone(M.max_drawdown([100, 90, 95], 126))
+
     def test_monotonic_up_zero(self):
         self.assertEqual(M.max_drawdown(list(range(1, 50)), 40), 0.0)
 
@@ -57,9 +60,9 @@ class TestRegression(unittest.TestCase):
 
 class TestMomentum121(unittest.TestCase):
     def test_known_value(self):
-        # 长度 260：base=closes[-253], recent=closes[-21]
+        # 长度 260：base=closes[-253], recent=closes[-22] (P(t-21))
         closes = [float(i) for i in range(1, 261)]
-        base, recent = closes[-253], closes[-21]
+        base, recent = closes[-253], closes[-22]
         expect = round((recent / base - 1) * 100, 2)
         self.assertEqual(M.momentum_12_1(closes), expect)
 
@@ -69,10 +72,10 @@ class TestMomentum121(unittest.TestCase):
         self.assertIsNone(M.momentum_12_1(closes))
 
     def test_exactly_253_bars_computes(self):
-        # 恰好 253 根：base=closes[-253]=closes[0]，应可算
+        # 恰好 253 根：base=closes[-253]=closes[0]，recent=closes[-22]，应可算
         closes = [float(i) for i in range(1, 254)]
         self.assertEqual(M.momentum_12_1(closes),
-                         round((closes[-21] / closes[-253] - 1) * 100, 2))
+                         round((closes[-22] / closes[-253] - 1) * 100, 2))
 
 
 class TestATR(unittest.TestCase):
