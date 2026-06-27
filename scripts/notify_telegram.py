@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """把分析结论推送到 Telegram（仅 Python 标准库 urllib，不依赖第三方）。
 
-读取环境变量 TELEGRAM_BOT_TOKEN 与 TELEGRAM_CHAT_ID：
+读取 skill 根目录 `.env` 或环境变量 TELEGRAM_BOT_TOKEN 与 TELEGRAM_CHAT_ID：
   - 两者都配置 -> 发送消息，输出 {"ok": true, "message_id": ...}
   - 任一缺失   -> stderr 打印配置指引，stdout 输出 {"ok": false, "error": "telegram_not_configured", ...}，退出码 2
 
@@ -14,20 +14,22 @@
 """
 import argparse
 import json
-import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from local_env import DEFAULT_ENV_PATH, get_env
 
 API = "https://api.telegram.org/bot{token}/sendMessage"
 MAX_LEN = 4096  # Telegram 单条消息字符上限
 TRUNCATED_MARK = "\n…(已截断)"
 
 CONFIG_HINT = (
-    "未配置 Telegram 凭证，无法发送通知。请设置以下环境变量后重试：\n"
-    "  export TELEGRAM_BOT_TOKEN=<你的 bot token>   # 向 @BotFather 创建 bot 获取\n"
-    "  export TELEGRAM_CHAT_ID=<目标 chat id>        # 给 bot 发条消息后用 getUpdates 查 chat.id\n"
+    "未配置 Telegram 凭证，无法发送通知。请在 skill 根目录 .env 写入，或设置同名环境变量：\n"
+    f"  {DEFAULT_ENV_PATH}\n"
+    "  TELEGRAM_BOT_TOKEN=<你的 bot token>   # 向 @BotFather 创建 bot 获取\n"
+    "  TELEGRAM_CHAT_ID=<目标 chat id>        # 给 bot 发条消息后用 getUpdates 查 chat.id\n"
 )
 
 
@@ -76,8 +78,8 @@ def main():
     p.add_argument("--timeout", type=int, default=15)
     args = p.parse_args()
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    token = get_env("TELEGRAM_BOT_TOKEN").strip()
+    chat_id = get_env("TELEGRAM_CHAT_ID").strip()
     if not token or not chat_id:
         missing = [n for n, v in (("TELEGRAM_BOT_TOKEN", token),
                                   ("TELEGRAM_CHAT_ID", chat_id)) if not v]

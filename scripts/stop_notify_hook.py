@@ -20,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 
+from local_env import get_env
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 NOTIFY = os.path.join(HERE, "notify_telegram.py")
 
@@ -33,8 +35,8 @@ _TICKER_BARE = re.compile(r"(?<![A-Za-z])([A-Z]{1,5}(?:[.\-][A-Z]{1,4})?)(?![A-Z
 _TICKER_STOP = {"MA", "MACD", "RSI", "KDJ", "SPY", "QQQ", "DIF", "DEA",
                 "OBV", "ATR", "ETF", "USD", "API", "JSON", "OK"}
 
-# 只从「结论」段保留这几条核心字段（标的另起标题，强制排除/评分拆解等略去）
-_CONCL_FIELDS = ("是否值得买", "建议", "纪律评分", "一句话")
+# 只从「结论」段保留这几条核心字段（标的另起标题，评分拆解等略去）
+_CONCL_FIELDS = ("是否值得买", "建议", "纪律评分", "强制排除条件", "一句话")
 # 匹配多种标题形式：**结论** / **结论：** / ## 结论 / ### 结论
 _HEADER_RE = re.compile(r"^\s*(?:\*{2}(.+?)\*{2}|#{1,4}\s*\*{0,2}(.+?)\*{0,2})\s*$")
 _BULLET_RE = re.compile(r"^\s*[-*•]\s+")
@@ -160,6 +162,15 @@ def _record_sent(session_id, marker):
         pass
 
 
+def _notification_env():
+    env = os.environ.copy()
+    for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        value = get_env(name)
+        if value:
+            env[name] = value
+    return env
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -195,7 +206,7 @@ def main():
     try:
         subprocess.Popen(
             args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL, start_new_session=True,
+            stdin=subprocess.DEVNULL, start_new_session=True, env=_notification_env(),
         )
         _record_sent(session_id, marker)
     except OSError:

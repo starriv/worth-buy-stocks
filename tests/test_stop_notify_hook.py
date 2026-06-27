@@ -2,7 +2,9 @@
 """Stop hook 的 Telegram 消息抽取/格式化测试（_format_message）。不触网。"""
 import os
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -46,7 +48,7 @@ class TestFormat(unittest.TestCase):
         self.assertIn("📈 <b>AVGO</b> 分析结论", self.msg)
 
     def test_keeps_conclusion_fields(self):
-        for f in ("是否值得买: 观察", "建议: 观察等待", "纪律评分: 72/100", "一句话:"):
+        for f in ("是否值得买: 观察", "建议: 观察等待", "纪律评分: 72/100", "强制排除条件: 无", "一句话:"):
             self.assertIn(f, self.msg)
 
     def test_keeps_evidence_bullets(self):
@@ -54,8 +56,8 @@ class TestFormat(unittest.TestCase):
         self.assertIn("• 相对强度", self.msg)
 
     def test_drops_chart_table_and_extras(self):
-        # K 线 ASCII、代码围栏、表格、标的/强制排除行都不应出现
-        for junk in ("█", "```", "|", "日K", "标的", "强制排除"):
+        # K 线 ASCII、代码围栏、表格、标的行都不应出现
+        for junk in ("█", "```", "|", "日K", "标的"):
             self.assertNotIn(junk, self.msg)
 
     def test_html_escapes_angle_brackets(self):
@@ -76,6 +78,20 @@ class TestEdge(unittest.TestCase):
         msg = H._format_message(
             "**结论**\n\n- 是否值得买: 否\n\n**关键证据**\n\n- NVDA 跌破 MA60")
         self.assertIn("NVDA", msg)
+
+    def test_notification_env_reads_local_env_file(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
+            f.write("TELEGRAM_BOT_TOKEN=file-token\nTELEGRAM_CHAT_ID=file-chat\n")
+            path = f.name
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        with patch.dict(os.environ, {
+            "WORTH_BUY_STOCKS_ENV_FILE": path,
+            "TELEGRAM_BOT_TOKEN": "shell-token",
+            "TELEGRAM_CHAT_ID": "shell-chat",
+        }, clear=True):
+            env = H._notification_env()
+        self.assertEqual(env["TELEGRAM_BOT_TOKEN"], "file-token")
+        self.assertEqual(env["TELEGRAM_CHAT_ID"], "file-chat")
 
 
 if __name__ == "__main__":

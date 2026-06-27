@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 
 SCRIPTS = os.path.join(os.path.dirname(__file__), "..", "scripts")
@@ -29,6 +30,9 @@ class TestNotConfigured(unittest.TestCase):
     def test_missing_creds_exit_2(self):
         env = {k: v for k, v in os.environ.items()
                if k not in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")}
+        env["WORTH_BUY_STOCKS_ENV_FILE"] = os.path.join(
+            tempfile.gettempdir(), "wbs_missing_telegram_test.env"
+        )
         res = subprocess.run(
             [sys.executable, os.path.join(SCRIPTS, "notify_telegram.py"), "--text", "hi"],
             capture_output=True, text=True, env=env)
