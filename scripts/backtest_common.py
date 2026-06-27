@@ -12,11 +12,15 @@
 方向是「显著缓解、未根除」。
 """
 import datetime
+import logging
+import os
 import sys
 
-sys.path.insert(0, __import__("os").path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(__file__))
 from fetching import fetch_bars  # noqa: E402
-from analysis import build_result  # noqa: E402
+from pipeline import build_result  # noqa: E402
+
+logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
 # 今日仍在交易的大盘流动性票
 ALIVE = [
@@ -50,21 +54,39 @@ class Panel:
         self.bars = bars
         self.used_feed = used_feed
         self.adjustment = adjustment
-        self.syms = UNIVERSE + BENCH
+        self.syms = list(dict.fromkeys(UNIVERSE + BENCH + list(bars)))
         self.closes_by_date = {
             s: {b["t"][:10]: b["c"] for b in bars.get(s, [])} for s in self.syms
+        }
+        self.dates_by_symbol = {
+            s: sorted(self.closes_by_date.get(s, {})) for s in self.syms
         }
         self.calendar = [b["t"][:10] for b in bars.get("SPY", [])]
 
     def close(self, sym, date):
         return self.closes_by_date.get(sym, {}).get(date)
 
+    def close_on_or_before(self, sym, date, after_date=None):
+        """Return last available close <= date, optionally requiring it after entry."""
+        by_date = self.closes_by_date.get(sym, {})
+        for d in reversed(self.dates_by_symbol.get(sym, [])):
+            if d <= date and (after_date is None or d > after_date):
+                return by_date.get(d)
+        return None
+
     def fwd_return_pct(self, sym, ti, horizon):
         """sym 从 calendar[ti] 到 calendar[ti+horizon] 的收益（%）；缺价返回 None。"""
         if ti + horizon >= len(self.calendar):
             return None
-        c0 = self.close(sym, self.calendar[ti])
-        c1 = self.close(sym, self.calendar[ti + horizon])
+        entry_date = self.calendar[ti]
+        target_date = self.calendar[ti + horizon]
+        c0 = self.close(sym, entry_date)
+        c1 = self.close(sym, target_date)
+        if c1 is None:
+            # Delisted/merged names often stop before the benchmark target date.
+            # Use the last available post-entry close so the observation remains
+            # in the panel instead of silently reintroducing survivorship bias.
+            c1 = self.close_on_or_before(sym, target_date, after_date=entry_date)
         return (c1 / c0 - 1) * 100 if (c0 and c1) else None
 
     def scores_at(self, tdate):
@@ -78,10 +100,10 @@ def load_panel(feed, adjustment, timeout, history_days=HISTORY_DAYS):
     end = datetime.date.today().isoformat()
     start = (datetime.date.today() - datetime.timedelta(days=history_days)).isoformat()
     syms = UNIVERSE + BENCH
-    print(f"拉取 {len(syms)} 只标的日线 {start}→{end} …", file=sys.stderr)
+    logging.info(f"拉取 {len(syms)} 只标的日线 {start}→{end} …")
     bars, used_feed, note = fetch_bars(syms, start, end, feed, adjustment, 10000, timeout)
     if note:
-        print(note, file=sys.stderr)
+        logging.info(note)
     return Panel(bars, used_feed, adjustment)
 
 

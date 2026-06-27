@@ -11,9 +11,11 @@
 输出纯统计，不下单。仅用本机 alpaca CLI 拉数。含幸存者偏差，看方向与量级。
 """
 import argparse
+import logging
+import os
 import sys
 
-sys.path.insert(0, __import__("os").path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(__file__))
 from backtest_common import (  # noqa: E402
     UNIVERSE, WARMUP, STEP, HORIZONS,
     load_panel, spearman, mean_t, bucket_mean, quintile_spread,
@@ -23,10 +25,10 @@ from backtest_common import (  # noqa: E402
 def run(feed, adjustment, timeout):
     panel = load_panel(feed, adjustment, timeout)
     if len(panel.calendar) < WARMUP + max(HORIZONS) + STEP:
-        print("历史不足，无法回测", file=sys.stderr)
+        logging.warning("历史不足，无法回测")
         return
     rebal_idx = list(range(WARMUP, len(panel.calendar) - max(HORIZONS), STEP))
-    print(f"rebalance 时点数: {len(rebal_idx)}", file=sys.stderr)
+    logging.info(f"rebalance 时点数: {len(rebal_idx)}")
 
     obs = {h: [] for h in HORIZONS}        # (composite, fwd_ret)
     ic_by_date = {h: [] for h in HORIZONS}
@@ -117,7 +119,7 @@ def _report_gate_ab(gate_ab):
 
 def main():
     p = argparse.ArgumentParser(description="composite 分因子有效性回测")
-    p.add_argument("--feed", default="iex")
+    p.add_argument("--feed", default="iex", help="Alpaca 数据源，默认 iex；无 SIP 权限不要用 sip")
     p.add_argument("--adjustment", default="split")
     p.add_argument("--timeout", type=int, default=60)
     args = p.parse_args()

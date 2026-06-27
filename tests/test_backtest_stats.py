@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import backtest_common as B  # noqa: E402
+import backtest_factor_ic as BF  # noqa: E402
 
 
 class TestRanks(unittest.TestCase):
@@ -64,6 +65,51 @@ class TestBuckets(unittest.TestCase):
 
     def test_quintile_too_few_is_none(self):
         self.assertIsNone(B.quintile_spread([(1, 1.0)] * 5))
+
+
+class TestPanelReturns(unittest.TestCase):
+    def test_fwd_return_uses_last_available_post_entry_close(self):
+        bars = {
+            "SPY": [
+                {"t": "2026-01-01T00:00:00Z", "c": 400},
+                {"t": "2026-01-02T00:00:00Z", "c": 401},
+                {"t": "2026-01-05T00:00:00Z", "c": 402},
+            ],
+            "AAPL": [
+                {"t": "2026-01-01T00:00:00Z", "c": 100},
+                {"t": "2026-01-02T00:00:00Z", "c": 50},
+            ],
+        }
+        panel = B.Panel(bars, "iex", "split")
+        self.assertEqual(panel.fwd_return_pct("AAPL", 0, 2), -50.0)
+
+
+class TestFactorICFeatures(unittest.TestCase):
+    def test_trend_factor_is_computed_outside_alpha_breakdown(self):
+        row = {
+            "ma": {
+                "MA20": 120, "MA60": 110, "MA200": 100,
+                "above_MA60": True, "MA60_rising": True,
+                "above_MA200": True,
+            },
+            "weekly": {"bearish_alignment": False},
+            "score": {
+                "factor_breakdown": {
+                    "momentum": {"score_pct": 80},
+                    "rel_strength": {"score_pct": 70},
+                    "efficiency": {"score_pct": 60},
+                },
+                "confirmation": {
+                    "technical_pct": 50,
+                    "volume_pct": 40,
+                    "trend_quality_pct": 55,
+                },
+                "composite": 75,
+            },
+        }
+        feats = BF._features(row)
+        self.assertEqual(feats["trend"], 100)
+        self.assertEqual(feats["trend_quality"], 55)
 
 
 if __name__ == "__main__":

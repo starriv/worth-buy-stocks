@@ -10,15 +10,16 @@
 复用 backtest_common 的取数与切片（严格 <= t）。仅用本机 alpaca CLI，输出纯统计。
 """
 import argparse
+import datetime
+import os
 import sys
 
-sys.path.insert(0, __import__("os").path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(__file__))
 from fetching import _fetch_feed, FeedLimitError  # noqa: E402
 from metrics import ma  # noqa: E402
 from backtest_common import (  # noqa: E402
     UNIVERSE, DELISTED, WARMUP, HISTORY_DAYS, load_panel, spearman, mean_t, quintile_spread,
 )
-import datetime  # noqa: E402
 
 # 仍未纳入篮子的死亡名字（残余幸存者缺口）：SBNY 数据存疑、CREE 更名 WOLF，
 # 另含本轮未加的破产票（Bed Bath、WeWork、Rite Aid）。DELISTED 已纳入的不再探针。
@@ -105,7 +106,7 @@ def _survivorship_probe(feed, adjustment, timeout):
 
 def main():
     p = argparse.ArgumentParser(description="稳健性回测：非重叠 + regime + 幸存者探针")
-    p.add_argument("--feed", default="iex")
+    p.add_argument("--feed", default="iex", help="Alpaca 数据源，默认 iex；无 SIP 权限不要用 sip")
     p.add_argument("--adjustment", default="split")
     p.add_argument("--timeout", type=int, default=60)
     args = p.parse_args()
