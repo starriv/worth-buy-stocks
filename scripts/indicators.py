@@ -80,8 +80,31 @@ from portfolio import (  # noqa: F401
     normalize_account_context,
 )
 from scoring import score  # noqa: F401
+from agent_contracts import (  # noqa: E402
+    KIND_ACCOUNT,
+    KIND_BARS,
+    KIND_FINNHUB,
+    KIND_NEWS,
+    KIND_RESULT,
+    ContractError,
+    validate_payload,
+)
 
 BENCHMARK_SYMBOLS = ("SPY", "QQQ")
+
+
+def _validate_or_drop(kind, payload, label):
+    """Validate an optional overlay artifact; on failure, warn on stderr and return False.
+
+    The caller decides what to do with a False return — typically drop the overlay
+    (mark unavailable) so the core price/volume scoring continues uninterrupted.
+    """
+    try:
+        validate_payload(kind, payload)
+    except ContractError as e:
+        sys.stderr.write(f"警告: {label} 违反契约，已丢弃该 overlay: {e}\n")
+        return False
+    return True
 
 
 def _symbols_with_benchmarks(symbols, bars=None):
@@ -102,6 +125,8 @@ def _load_llm_context(path):
         return None
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
+    if not _validate_or_drop(KIND_NEWS, data, "--llm-context-file"):
+        return None
     if not isinstance(data, dict):
         raise RuntimeError("--llm-context-file 必须是 JSON object")
     raw = data.get("symbols") if isinstance(data.get("symbols"), dict) else data
@@ -116,6 +141,8 @@ def _load_account_context(path):
         return None
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
+    if not _validate_or_drop(KIND_ACCOUNT, data, "--account-context-file"):
+        return {"status": "unavailable", "reason": "account_context 契约校验失败"}
     return normalize_account_context(data)
 
 
@@ -125,7 +152,19 @@ def _load_finnhub_context(path):
         return None
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
+    if not _validate_or_drop(KIND_FINNHUB, data, "--finnhub-context-file"):
+        return {"status": "unavailable", "reason": "finnhub_context 契约校验失败"}
     return normalize_finnhub_context(data)
+
+
+def _load_bars_input(path):
+    """Load and validate the blocking bars artifact. Fatal on contract violation."""
+    bars = _load_input(path)
+    try:
+        validate_payload(KIND_BARS, {"status": "ok", "bars": bars})
+    except ContractError as e:
+        raise RuntimeError(f"bars artifact 违反契约，无法评分: {e}") from e
+    return bars
 
 
 def _account_context_from_args(args):
@@ -200,7 +239,7 @@ def main():
     llm_context = _load_llm_context(args.llm_context_file)
 
     if args.input:
-        bars = _load_input(args.input)
+        bars = _load_bars_input(args.input)
         symbols = ([s.strip().upper() for s in args.symbols.split(",") if s.strip()]
                    if args.symbols else list(bars.keys()))
         symbols = _symbols_with_benchmarks(symbols, bars)
@@ -240,6 +279,11 @@ def main():
             llm_context=effective_llm_context, account_context=account_context,
             finnhub_context=finnhub_context,
         )
+
+    try:
+        validate_payload(KIND_RESULT, result)
+    except ContractError as e:
+        sys.stderr.write(f"警告: 评分结果自检失败: {e}\n")
 
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")

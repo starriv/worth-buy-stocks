@@ -185,7 +185,7 @@ class TestBuildResultInput(unittest.TestCase):
         self.assertIn("error", res["symbols"]["MISSING"])
 
     def test_load_llm_context_file(self):
-        payload = {"symbols": {"aapl": {"data_trust": "suspect"}}}
+        payload = {"symbols": {"AAPL": {"data_trust": "suspect"}}}
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
             json.dump(payload, f)
             path = f.name
@@ -214,7 +214,7 @@ class TestBuildResultInput(unittest.TestCase):
     def test_load_finnhub_context_file(self):
         payload = {
             "symbols": {
-                "aapl": {
+                "AAPL": {
                     "quote": {"current_price": 123.45},
                     "news": [{"headline": "news"}],
                     "data_flags": [],
@@ -230,6 +230,92 @@ class TestBuildResultInput(unittest.TestCase):
             os.unlink(path)
         self.assertEqual(ctx["status"], "ok")
         self.assertEqual(ctx["symbols"]["AAPL"]["quote"]["current_price"], 123.45)
+
+    def test_agent_contract_wrappers_remain_loader_compatible(self):
+        news_payload = {
+            "contract_version": "worth-buy-stocks.agent.v1",
+            "kind": "news_context",
+            "status": "ok",
+            "symbols": {"AAPL": {"data_trust": "suspect", "red_flags": []}},
+        }
+        account_payload = {
+            "contract_version": "worth-buy-stocks.agent.v1",
+            "kind": "account_context",
+            "status": "ok",
+            "account": {"equity": "100000"},
+            "positions": [{"symbol": "AAPL", "market_value": "1000"}],
+        }
+        finnhub_payload = {
+            "contract_version": "worth-buy-stocks.agent.v1",
+            "kind": "finnhub_context",
+            "status": "ok",
+            "symbols": {"AAPL": {"quote": {"current_price": 123.45}, "data_flags": []}},
+        }
+        bars_payload = {
+            "contract_version": "worth-buy-stocks.agent.v1",
+            "kind": "bars",
+            "status": "ok",
+            "bars": {"AAPL": _bars([100.0, 101.0, 102.0])},
+        }
+
+        paths = []
+        try:
+            for payload in (news_payload, account_payload, finnhub_payload, bars_payload):
+                f = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False)
+                json.dump(payload, f)
+                f.close()
+                paths.append(f.name)
+            self.assertEqual(I._load_llm_context(paths[0])["AAPL"]["data_trust"], "suspect")
+            self.assertEqual(I._load_account_context(paths[1])["positions"]["AAPL"]["market_value"], 1000.0)
+            self.assertEqual(I._load_finnhub_context(paths[2])["symbols"]["AAPL"]["quote"]["current_price"], 123.45)
+            self.assertEqual(len(I._load_input(paths[3])["AAPL"]), 3)
+        finally:
+            for path in paths:
+                if os.path.exists(path):
+                    os.unlink(path)
+
+    def test_invalid_news_context_is_dropped_by_loader(self):
+        invalid_payload = {"AAPL": {"red_flags": [{"type": "x", "severity": "critical", "note": "y"}]}}
+        f = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False)
+        json.dump(invalid_payload, f)
+        f.close()
+        try:
+            self.assertIsNone(I._load_llm_context(f.name))
+        finally:
+            os.unlink(f.name)
+
+    def test_invalid_account_context_returns_unavailable(self):
+        invalid_payload = {"kind": "account_context", "status": "ok", "account": "not_an_object"}
+        f = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False)
+        json.dump(invalid_payload, f)
+        f.close()
+        try:
+            ctx = I._load_account_context(f.name)
+            self.assertEqual(ctx["status"], "unavailable")
+        finally:
+            os.unlink(f.name)
+
+    def test_invalid_finnhub_context_returns_unavailable(self):
+        invalid_payload = {"kind": "finnhub_context", "status": "ok", "symbols": "not_an_object"}
+        f = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False)
+        json.dump(invalid_payload, f)
+        f.close()
+        try:
+            ctx = I._load_finnhub_context(f.name)
+            self.assertEqual(ctx["status"], "unavailable")
+        finally:
+            os.unlink(f.name)
+
+    def test_invalid_bars_input_raises(self):
+        bad_bars = {"bars": {"aapl": [{"t": "2026-06-26T04:00:00Z", "o": 1, "h": 2, "l": 1, "v": 100}]}}
+        f = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False)
+        json.dump(bad_bars, f)
+        f.close()
+        try:
+            with self.assertRaises(RuntimeError):
+                I._load_bars_input(f.name)
+        finally:
+            os.unlink(f.name)
 
     def test_finnhub_auto_without_key_does_not_fetch(self):
         args = SimpleNamespace(

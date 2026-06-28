@@ -1,6 +1,6 @@
 ---
 name: worth-buy-stocks
-description: "Evaluate whether an individual stock is worth buying, holding, reducing, avoiding, or watchlisting under the user's Alpaca-based trend-following and relative-strength framework with default news/event risk and account-position exposure overlay. Use when the user asks 值得买吗, 股票版, 股票评分, buy/hold/sell/avoid/watchlist, Alpaca market data, Alpaca 持仓, account exposure, 入场价, 出场价, 止盈止损, 30 天行情, 当日行情, 新闻面, 事件风险, 交易纪律, 趋势跟随, 相对强度, 主升趋势, 修正阶段, 日线 MA60, 周线均线空头排列, momentum leadership, countertrend-entry avoidance, 量价确认, 顶背离, or 超买超卖."
+description: "Evaluate whether an individual stock is worth buying, holding, reducing, avoiding, or watchlisting under the user's Alpaca-based trend-following and relative-strength framework with default news/event risk and account-position exposure overlay, including multi-agent evidence collection via stable JSON contracts. Use when the user asks 值得买吗, 股票版, 股票评分, buy/hold/sell/avoid/watchlist, Alpaca market data, Alpaca 持仓, account exposure, multi-agent stock analysis, agent contracts, 并行采集, 多 agent, 入场价, 出场价, 止盈止损, 30 天行情, 当日行情, 新闻面, 事件风险, 交易纪律, 趋势跟随, 相对强度, 主升趋势, 修正阶段, 日线 MA60, 周线均线空头排列, momentum leadership, countertrend-entry avoidance, 量价确认, 顶背离, or 超买超卖."
 ---
 
 # 值得买 - 股票版
@@ -66,6 +66,46 @@ alpaca position list --quiet
 
 - Finnhub API key：用于补充 quote/news/profile/earnings。优先从 skill 根目录 `.env` 的 `FINNHUB_API_KEY` 读取；无 key 时自动跳过。
 - Telegram 推送仅在用户要求通知时需要：优先从 skill 根目录 `.env` 读取 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`。
+
+## 多 agent 编排
+
+运行时支持 sub-agent 且用户要求多 agent/并行分析，或同一请求同时需要新闻、账户、Finnhub、图表和复核时，采用主 agent 编排模式。单 agent 环境仍按“数据流程”执行。
+
+主 agent 必须保留：
+
+- 用户意图解析：ticker、feed、是否要账户 overlay、新闻面、K 线图、Telegram。
+- 安全边界：不下单、不使用其他券商连接器、不输出密钥、不让 sub-agent 手算指标。
+- 最终评分运行：只运行 `scripts/indicators.py` 或等价的 `build_result()`，以脚本 `score` 为唯一结论来源。
+- Artifact 合并：把 sub-agent 产物保存为 JSON 文件，校验后通过 `--llm-context-file`、`--account-context-file`、`--finnhub-context-file`、`--input` 传入。
+- 最终回复：直接引用 `score.verdict`、`score.composite`、`score.trade_plan`、`score.account_overlay`、`score.llm_overlay`。
+
+允许委派的角色：
+
+- Market data agent：只拉取 Alpaca snapshot/bars 或执行离线 bars 准备，返回 `bars` artifact 或失败状态。
+- News/event-risk agent：检索最近 30 天 IR、SEC、交易所公告和主流财经媒体，返回 `news_context` artifact；只识别风险，不写买入结论。
+- Account overlay agent：只读 Alpaca account/positions，返回 `account_context` artifact；失败返回 `status=unavailable`。
+- Finnhub context agent：可选读取 quote/news/profile/earnings，返回 `finnhub_context` artifact；无 key 或限流返回结构化 unavailable/rate_limited。
+- Chart agent：只在用户要求或主 agent 需要视觉确认时运行 `scripts/chart.py`。
+- QA agent：只检查最终回复是否遵守本 skill；不得改写脚本评分或生成替代结论。
+
+禁止委派：
+
+- 把 MACD/RSI/KDJ/均线/评分交给 sub-agent 手算。
+- 让多个 sub-agent 产生互相竞争的买/卖评级再投票。
+- 让新闻、利好催化剂或分析师目标价加分或升级结论。
+- 创建、修改或取消订单。
+
+多 agent artifact 的字段契约见 `references/agent-contracts.md`。要求 sub-agent 只返回机器可读 JSON 或清楚说明无法生成；主 agent 可用下面的校验脚本检查产物：
+
+```bash
+python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind news_context news_context.json
+python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind account_context account_context.json
+python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind finnhub_context finnhub_context.json
+python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind bars bars.json
+python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind result result.json
+```
+
+`scripts/indicators.py` 在加载每个 `--*-file` artifact 时会自动调用同一套验证器：可选 overlay（news/account/finnhub）校验失败时丢弃该 overlay 并在 stderr 警告，核心价量评分照常执行；核心 `bars`（`--input`）校验失败时输出 `无法评分` 并退出。评分结束后还会对 `result` 做一次自检，自检失败仅在 stderr 警告、不阻断输出。主 agent 仍应在喂入前用上面的 CLI 预检，以便在 sub-agent 产物有问题时提前要求重新生成。
 
 ## 数据流程
 
@@ -166,7 +206,15 @@ alpaca asset get --symbol-or-asset-id {TICKER} --quiet
 
 ## 输出格式
 
-默认中文，先结论后证据。只保留决策需要的信息。
+默认中文，先结论后证据。不要只给一句买/不买；最终回复必须包含下面 7 个标题，顺序固定为：`结论`、`关键证据`、`风控过滤条件`、`评分拆解`、`账户敞口与交易计划`、`新闻面风控`、`建议`。除非核心数据缺失导致 `无法评分`，否则不得省略或合并这些标题。
+
+硬性完整性规则：
+
+- 所有价格、仓位、止损、止盈和封顶结论都必须来自 `score` 字段；缺字段时写“无法确认”，不要猜。
+- `结论` 段必须写清：是否值得买、建议动作、纪律评分、当前持仓、建议入场价、建议出场价、止盈参考、强制排除条件和一句话依据。
+- `风控过滤条件` 表至少覆盖：大盘 regime、个股趋势闸门、相对 SPY/QQQ 强度、30 日结构/追价质量、技术与量价确认、流动性/数据质量、新闻/事件红旗、账户敞口。没有触发风险也要写“通过/未触发”，不要省略。
+- `账户敞口与交易计划` 必须写保护性出场价、移动止损、2R/3R 止盈、追价上限和仓位处理；无持仓也要写“当前无持仓，不构成下单指令”。
+- `新闻面风控` 必须写新闻检索状态和红旗状态；新闻不可用时写“新闻面无法确认，未用于降级”。
 
 **结论**
 
@@ -177,7 +225,7 @@ alpaca asset get --symbol-or-asset-id {TICKER} --quiet
 - 当前持仓: 无 / 已持仓 `X%` 账户权益 / 账户持仓无法确认
 - 建议入场价: 使用 `score.trade_plan.suggested_entry_price`；若不建议新开仓写“不建议入场”
 - 建议出场价: 使用 `score.trade_plan.stop_loss_price` 或持仓时 `score.account_overlay.position_plan.protective_exit_price`
-- 止盈参考: 使用 `score.trade_plan.take_profit_price` / `take_profit_2_price`
+- 止盈参考: 使用 `score.trade_plan.take_profit_price` / `take_profit_2_price`，并注明 `trailing_stop_pct`
 - 强制排除条件: 使用 `score.blocking_reasons`；没有写 `无`
 - 一句话: 最关键依据
 
@@ -189,21 +237,42 @@ alpaca asset get --symbol-or-asset-id {TICKER} --quiet
 
 用表格，列名固定为：`过滤条件`, `状态`, `关键证据`, `处理建议`。
 
+固定行（按可用字段填写，不能整块省略）：
+
+| 过滤条件 | 状态 | 关键证据 | 处理建议 |
+|---|---|---|---|
+| 大盘 regime | 通过 / 风险 | `market_risk_off` 或 `score.risk_gates` 中的大盘项 | risk-off 时不新增或降至观察 |
+| 个股趋势闸门 | 通过 / 风险 | MA60、MA200、周线排列、`score.risk_gates` | 跌破关键均线时不新开；已持仓按保护价管理 |
+| 相对强度 | 通过 / 偏弱 / 无法确认 | 相对 SPY/QQQ 的 3m/6m 强弱 | 跑输基准则等待重评 |
+| 30 日结构与追价 | 通过 / 过热 / 破位 | 30 日高低位、`pullback_entry_price`、`breakout_entry_price`、`max_chase_price` | 高于追价上限不追；等回踩或突破确认 |
+| 技术与量价确认 | 通过 / 未确认 | `score.confirmation`、MACD/RSI/KDJ/成交量描述 | `confirmation.ok=false` 时只观察不买 |
+| 流动性/数据质量 | 通过 / 风险 / 无法确认 | `score.data_flags`、snapshot 新鲜度、价差/成交量 | 数据异常时补数据后重评 |
+| 新闻/事件红旗 | 未触发 / 低 / 中 / 高 / 无法确认 | `score.llm_overlay.red_flags`、`downgrade_reasons`、`cap` | 中高风险只降级；不可用时不用于升级 |
+| 账户敞口 | 无持仓 / 已持仓 / 无法确认 / 风险 | `score.account_overlay` 当前仓位、目标仓位、差额 | 超目标减仓；无持仓按入场计划，不下单 |
+
 **评分拆解**
 
-引用 `score.factor_breakdown`、`composite/raw_composite`、`confirmation`、`suggested_position_pct`、`trade_plan`。若已封顶，说明触发的 `blocking_reasons`。
+引用 `score.factor_breakdown`、`composite/raw_composite`、`confirmation`、`suggested_position_pct`、`trade_plan`。若已封顶，说明触发的 `blocking_reasons` 和 `cap_applied`。至少写明 momentum、relative strength、efficiency 三项的得分/贡献。
 
 **账户敞口与交易计划**
 
-固定放在“评分拆解”后、“新闻面风控”前。读取到 Alpaca 持仓时，写当前持仓市值占账户权益比例、脚本目标仓位、差额、成本价、浮盈亏、保护性出场价、止盈参考和 `account_overlay.suggested_action`。没有持仓时，写“当前无持仓”；账户读取失败时，写“账户持仓无法确认，未用于调整建议”。任何情况下都不要下单。
+固定放在“评分拆解”后、“新闻面风控”前。读取到 Alpaca 持仓时，写当前持仓市值占账户权益比例、脚本目标仓位、差额、成本价、浮盈亏、保护性出场价、移动止损、2R/3R 止盈参考、追价上限和 `account_overlay.suggested_action`。没有持仓时，写“当前无持仓”，仍要给出 `trade_plan` 的入场/止损/止盈/追价上限；账户读取失败时，写“账户持仓无法确认，未用于调整建议”。任何情况下都不要下单。
 
 **新闻面风控**
 
-固定放在“评分拆解”后面。写新闻检索状态、Finnhub 补充状态、主要 catalyst、红旗、来源日期/链接、是否触发 `llm_overlay.cap`。无红旗写“未发现可验证的重大新闻红旗，未影响评分”；新闻不可用写“新闻面无法确认，未用于降级”。Finnhub 新闻/财报只能帮助识别事件风险，不得把利好新闻用于加分。
+固定放在“账户敞口与交易计划”后面。写新闻检索状态、Finnhub 补充状态、主要 catalyst、红旗、来源日期/链接、是否触发 `llm_overlay.cap`。无红旗写“未发现可验证的重大新闻红旗，未影响评分”；新闻不可用写“新闻面无法确认，未用于降级”。Finnhub 新闻/财报只能帮助识别事件风险，不得把利好新闻用于加分。
 
 **建议**
 
 给出一个明确动作，并结合 `account_overlay.suggested_action`。若无持仓且 `trade_plan.status=entry_allowed`，可以写“按计划价分批新开”；若已有持仓且 verdict 为 `持仓需减风险`，明确写“减仓至目标敞口 / 跌破保护性出场价退出”；若账户 overlay 不可用，动作只基于价量和新闻面。只有用户要求详细数据时，才追加 Alpaca 明细、完整 JSON 字段或 K 线图。
+
+输出前自检（不要把自检过程写进最终回复）：
+
+- 7 个标题是否齐全且顺序正确。
+- `结论` 段是否包含入场、出场、止盈、持仓和强制排除条件。
+- `风控过滤条件` 是否包含固定 8 行，且每行都有处理建议。
+- `账户敞口与交易计划` 是否明确“不下单”，并写出保护性出场价、移动止损、2R/3R 止盈和追价上限。
+- `新闻面风控` 是否明确红旗/不可用状态，且没有把利好新闻用于升级。
 
 ## Telegram
 
@@ -214,5 +283,3 @@ printf '%s' "$DECISION_SUMMARY" | python3 "$SKILL_DIR/scripts/notify_telegram.py
 ```
 
 凭证优先从 skill 根目录 `.env` 读取 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`，环境变量作为 fallback。未配置时，转达脚本提示；分析结论不受影响。
-
-Claude Code Stop hook 会在最后回复同时包含「是否值得买」和「纪律评分」时自动推送精简摘要：股票代码、结论、建议、纪律评分、强制排除条件、一句话和关键证据。Codex 或其他 runtime 中需要手动调用通知脚本。

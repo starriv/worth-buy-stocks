@@ -1,4 +1,8 @@
+# Sub-agent roles (Market data / News / Account / Finnhub / Chart / QA) are NOT
+# registered here. They are instructional roles defined in SKILL.md's "多 agent
+# 编排" section and references/agent-contracts.md. The main LLM orchestrates by
+# following those instructions; this file only configures the skill interface.
 interface:
   display_name: "值得买 - 股票版"
-  short_description: "Alpaca 趋势评分 + Finnhub/持仓风控"
-  default_prompt: "用 $worth-buy-stocks 判断 AAPL 是否值得买，结合 Alpaca 市场数据、Finnhub 补充上下文、新闻面风控和账户持仓敞口。"
+  short_description: "多 agent 采集 + Alpaca 确定性评分"
+  default_prompt: "用 $worth-buy-stocks 评估 AAPL 是否值得买：并行采集新闻、Finnhub 和只读持仓上下文，最后以 scripts/indicators.py 的评分为准，按 SKILL.md 的 7 个固定标题输出完整交易纪律建议、风控过滤表和交易计划。"
