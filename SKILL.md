@@ -76,12 +76,12 @@ alpaca position list --quiet
 - 用户意图解析：ticker、feed、是否要账户 overlay、新闻面、K 线图、Telegram。
 - 安全边界：不下单、不使用其他券商连接器、不输出密钥、不让 sub-agent 手算指标。
 - 最终评分运行：只运行 `scripts/indicators.py` 或等价的 `build_result()`，以脚本 `score` 为唯一结论来源。
-- Artifact 合并：把 sub-agent 产物保存为 JSON 文件，校验后通过 `--llm-context-file`、`--account-context-file`、`--finnhub-context-file`、`--input` 传入。
+- Artifact 合并：把 sub-agent 产物保存为 JSON 文件，校验后通过 `--llm-context-file`、`--account-context-file`、`--finnhub-context-file`、`--snapshot-context-file`、`--input` 传入。
 - 最终回复：直接引用 `score.verdict`、`score.composite`、`score.trade_plan`、`score.account_overlay`、`score.llm_overlay`。
 
 允许委派的角色：
 
-- Market data agent：只拉取 Alpaca snapshot/bars 或执行离线 bars 准备，返回 `bars` artifact 或失败状态。
+- Market data agent：只拉取 Alpaca bars 或执行离线 bars 准备，返回 `bars` artifact 或失败状态。当日 snapshot 由 `indicators.py` 自动并行拉取并写入 `supplemental`，无需 sub-agent 单独采集。
 - News/event-risk agent：检索最近 30 天 IR、SEC、交易所公告和主流财经媒体，返回 `news_context` artifact；只识别风险，不写买入结论。
 - Account overlay agent：只读 Alpaca account/positions，返回 `account_context` artifact；失败返回 `status=unavailable`。
 - Finnhub context agent：可选读取 quote/news/profile/earnings，返回 `finnhub_context` artifact；无 key 或限流返回结构化 unavailable/rate_limited。
@@ -102,10 +102,11 @@ python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind news_context news
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind account_context account_context.json
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind finnhub_context finnhub_context.json
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind bars bars.json
+python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind snapshot_context snapshot_context.json
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind result result.json
 ```
 
-`scripts/indicators.py` 在加载每个 `--*-file` artifact 时会自动调用同一套验证器：可选 overlay（news/account/finnhub）校验失败时丢弃该 overlay 并在 stderr 警告，核心价量评分照常执行；核心 `bars`（`--input`）校验失败时输出 `无法评分` 并退出。评分结束后还会对 `result` 做一次自检，自检失败仅在 stderr 警告、不阻断输出。主 agent 仍应在喂入前用上面的 CLI 预检，以便在 sub-agent 产物有问题时提前要求重新生成。
+`scripts/indicators.py` 在加载每个 `--*-file` artifact 时会自动调用同一套验证器：可选 overlay（news/account/finnhub/snapshot）校验失败时丢弃该 overlay 并在 stderr 警告，核心价量评分照常执行；核心 `bars`（`--input`）校验失败时输出 `无法评分` 并退出。评分结束后还会对 `result` 做一次自检，自检失败仅在 stderr 警告、不阻断输出。主 agent 仍应在喂入前用上面的 CLI 预检，以便在 sub-agent 产物有问题时提前要求重新生成。
 
 ## 数据流程
 
@@ -116,19 +117,17 @@ SKILL_DIR="$HOME/.codex/skills/worth-buy-stocks"
 FEED="iex"
 ```
 
-1. 获取当日 snapshot：
+1. 当日 snapshot：由 `indicators.py` 自动拉取，无需主 agent 单独运行。
 
-```bash
-alpaca data multi-snapshots --symbols {TICKER},SPY,QQQ --feed "$FEED" --quiet
-```
+`indicators.py`（见第 3 步）在非离线模式下会自动调用 `alpaca data multi-snapshots`，提取最新价、bid/ask、价差、日内涨跌幅、成交量和最新成交时间，写入 `result.supplemental.snapshots`（顶层 summary）和每个 `symbol.supplemental.snapshot`（明细）。snapshot 只作补充信息，不参与 `score`。失败降级为 `status=unavailable`，不阻断评分。
 
-提取最新价、时间、bid/ask、价差、日内涨跌幅、日内位置、成交量和数据是否陈旧。只有批量 snapshot 缺字段时再用单票备用调用。
+不要在脚本之外再单独跑一遍 `multi-snapshots`——那只是重复一轮网络往返。只有脚本输出里 snapshot 字段缺失或可疑时，才用 `alpaca data multi-snapshots --symbols {TICKER},SPY,QQQ --feed "$FEED" --quiet` 人工核对。
 
 2. 默认检索最近 30 天新闻/公告/监管披露。
 
 优先公司 IR、SEC、交易所公告和主流财经媒体；保留标题、发布日期、链接。不要把社交媒体、无来源传闻、模型记忆或分析师目标价当作降级依据。高性能要求：只抓能影响交易纪律的 3-5 条材料，不做新闻综述。
 
-3. 运行评分脚本（一条命令完成价量指标 + 评分 + 账户 overlay + Finnhub 补充）：
+3. 运行评分脚本（一条命令完成价量指标 + 评分 + 账户 overlay + Finnhub 补充 + 当日 snapshot）：
 
 ```bash
 python3 "$SKILL_DIR/scripts/indicators.py" \
@@ -139,15 +138,19 @@ python3 "$SKILL_DIR/scripts/indicators.py" \
 
 `--start/--end` 默认省略，脚本取约两年已完成日线并计算所有指标、相对强度、市场 regime 和 `score`。默认 feed 是 `iex`；不要主动使用 `sip`，除非用户明确要求。
 
+脚本内部已对四段网络采集做并行：`bars`（两年日线）、`account`/`positions`、`finnhub`、`snapshot` 同时拉取，Finnhub 内部再对多 symbol 并行。主 agent **不要**为提速去手动并行这几段或拆 sub-agent——脚本单进程线程池已是最快路径，sub-agent 的启动/上下文成本只会更慢。各段独立失败降级，不阻断核心价量评分。
+
 可选 flag（按需追加到上面的命令）：
 
 | Flag | 默认 | 作用 |
 |------|------|------|
+| `--snapshot auto\|on\|off` | `auto` | 非离线模式拉取当日 snapshot（最新价/报价/成交），写入 `supplemental`，不参与 score；失败降级不阻断 |
 | `--account-context auto\|on\|off` | `auto` | 非离线模式只读 Alpaca 账户/持仓，生成敞口 overlay；失败不阻断评分 |
 | `--finnhub-context auto\|on\|off` | `auto` | 有 `.env`/`FINNHUB_API_KEY` 时读 Finnhub 补充（quote/news/profile/earnings）；无 key 不触网 |
 | `--llm-context-file news_context.json` | 无 | 传入新闻面风控 JSON（红旗/数据存疑），只降级不加分 |
 | `--account-context-file path` | 无 | 离线复盘：喂账户/持仓 JSON |
 | `--finnhub-context-file path` | 无 | 离线复盘：喂 Finnhub 补充 JSON |
+| `--snapshot-context-file path` | 无 | 离线复盘：喂当日 snapshot JSON |
 | `--input -` | 无 | 离线模式：从 stdin 读 multi-bars JSON，不触网 |
 
 Finnhub `auto` 模式会自动从 `company-news`/`earnings-calendar` 生成保守的 `llm_context` 候选：增发/调查/诉讼等明确负面关键词可触发 `medium/high` 红旗；7 天内财报只作为 `severity=low` 事件提醒；利好新闻忽略。若同时提供 `--llm-context-file`，手工上下文标量字段优先，来源和红旗追加合并。账户 overlay 失败时 `score.account_overlay.status=unavailable`，价量评分照常执行。

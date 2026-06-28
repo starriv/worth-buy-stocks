@@ -15,9 +15,10 @@ KIND_NEWS = "news_context"
 KIND_ACCOUNT = "account_context"
 KIND_FINNHUB = "finnhub_context"
 KIND_BARS = "bars"
+KIND_SNAPSHOT = "snapshot_context"
 KIND_RESULT = "result"
 
-KINDS = (KIND_NEWS, KIND_ACCOUNT, KIND_FINNHUB, KIND_BARS, KIND_RESULT)
+KINDS = (KIND_NEWS, KIND_ACCOUNT, KIND_FINNHUB, KIND_BARS, KIND_SNAPSHOT, KIND_RESULT)
 UNAVAILABLE_STATUSES = {"unavailable", "unauthorized", "rate_limited"}
 META_KEYS = {
     "contract_version", "kind", "status", "reason", "as_of", "provider",
@@ -203,11 +204,34 @@ def validate_result(payload: Any) -> dict[str, Any]:
     return {"symbols_count": len(symbols), "scored_symbols_count": scored}
 
 
+def validate_snapshot(payload: Any) -> dict[str, Any]:
+    _expect(_is_obj(payload), "$", "snapshot_context must be an object")
+    status = _status(payload, "$")
+    if status != "ok":
+        return {"symbols_count": 0}
+    symbols = payload.get("symbols")
+    _expect(isinstance(symbols, dict), "$.symbols", "symbols must be an object")
+    for symbol, ctx in symbols.items():
+        sp = f"$.symbols.{symbol}"
+        _validate_symbol_key(str(symbol), sp)
+        _expect(_is_obj(ctx), sp, "symbol snapshot must be an object")
+        _expect(
+            str(ctx.get("symbol") or symbol).strip().upper() == str(symbol).strip().upper(),
+            f"{sp}.symbol",
+            "symbol field must match key",
+        )
+        for key in ("daily_bar", "quote", "latest_trade", "minute_bar"):
+            if key in ctx:
+                _expect(_is_obj(ctx[key]), f"{sp}.{key}", f"{key} must be an object")
+    return {"symbols_count": len(symbols)}
+
+
 VALIDATORS = {
     KIND_NEWS: validate_news_context,
     KIND_ACCOUNT: validate_account_context,
     KIND_FINNHUB: validate_finnhub_context,
     KIND_BARS: validate_bars,
+    KIND_SNAPSHOT: validate_snapshot,
     KIND_RESULT: validate_result,
 }
 

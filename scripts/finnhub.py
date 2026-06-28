@@ -10,6 +10,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 from local_env import get_env
 from utils import to_num as _num
@@ -18,6 +19,7 @@ BASE_URL = "https://finnhub.io/api/v1"
 TOKEN_ENV = "FINNHUB_API_KEY"
 BENCHMARK_SYMBOLS = {"SPY", "QQQ"}
 EARNINGS_EVENT_WINDOW_DAYS = 7
+_FINNHUB_MAX_WORKERS = 8
 
 NEWS_RED_FLAG_RULES = [
     ("bankruptcy", "high", (
@@ -283,11 +285,20 @@ def fetch_finnhub_context(symbols, today=None, news_days=30, earnings_days=14,
         "as_of": _utc_now(),
         "symbols": {},
     }
-    for sym in clean:
-        ctx["symbols"][sym] = fetch_symbol_context(
+    # 多 symbol 并行拉取（每 symbol 内部 4 端点仍串行）。每 symbol 独立失败，
+    # 只影响自身 status，不阻断其他 symbol。按输入顺序收集结果以保持确定性。
+    def _one(sym):
+        return sym, fetch_symbol_context(
             sym, today=today, news_days=news_days, earnings_days=earnings_days,
             max_news=max_news, timeout=timeout, token=tok,
         )
+
+    workers = max(1, min(len(clean), _FINNHUB_MAX_WORKERS))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_one, sym) for sym in clean]
+        results = {f.result()[0]: f.result()[1] for f in futures}
+    for sym in clean:
+        ctx["symbols"][sym] = results[sym]
     if not ctx["symbols"]:
         ctx["status"] = "unavailable"
         ctx["reason"] = "没有可查询的 symbol"

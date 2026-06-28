@@ -17,7 +17,7 @@ Use this reference when the stock workflow is split across sub-agents. The main 
 
 1. Main agent parses the request and normalizes ticker symbols. Always include `SPY` and `QQQ` for relative strength when live bars are fetched.
 2. In parallel, delegate independent work where useful:
-   - Market data agent -> `bars.json` or snapshot notes.
+   - Market data agent -> `bars.json`. (当日 snapshot 由 `indicators.py` 自动并行拉取并写入 `supplemental`，无需 sub-agent 单独采集。)
    - News/event-risk agent -> `news_context.json`.
    - Account overlay agent -> `account_context.json`.
    - Finnhub context agent -> `finnhub_context.json`.
@@ -44,9 +44,11 @@ python3 "$SKILL_DIR/scripts/indicators.py" \
   --input bars.json \
   --account-context off \
   --finnhub-context off \
+  --snapshot off \
   --llm-context-file news_context.json \
   --account-context-file account_context.json \
-  --finnhub-context-file finnhub_context.json
+  --finnhub-context-file finnhub_context.json \
+  --snapshot-context-file snapshot_context.json
 ```
 
 5. Main agent writes the final answer from the `score` fields. If an optional artifact is missing or invalid, state that the overlay was unavailable and do not infer it.
@@ -187,6 +189,39 @@ Rules:
 - Positive news is never used to upgrade.
 - `status=unauthorized`, `status=rate_limited`, and `status=unavailable` are valid non-blocking states.
 
+## Artifact: snapshot_context
+
+Purpose: optional supplemental same-day snapshot (latest price, quote, trade). Produced automatically by `indicators.py` in non-offline mode via `alpaca data multi-snapshots`; an offline artifact is only needed for replay/tests. Snapshot is supplemental only and never feeds `score`.
+
+```json
+{
+  "contract_version": "worth-buy-stocks.agent.v1",
+  "kind": "snapshot_context",
+  "status": "ok",
+  "as_of": "2026-06-27T00:00:00Z",
+  "feed": "iex",
+  "symbols": {
+    "AAPL": {
+      "symbol": "AAPL",
+      "daily_bar": {"open": 193.5, "high": 196.0, "low": 193.0, "close": 195.5, "volume": 12345678, "vwap": 194.8, "date": "2026-06-26"},
+      "daily_change_pct": 1.03,
+      "quote": {"bid": 195.4, "ask": 195.6, "bid_size": 100, "ask_size": 200, "quote_time": "2026-06-26T20:00:00Z"},
+      "spread": 0.2,
+      "spread_pct": 0.1026,
+      "latest_trade": {"price": 195.5, "size": 50, "trade_time": "2026-06-26T19:30:00Z"},
+      "minute_bar": {"open": 195.4, "high": 195.6, "low": 195.3, "close": 195.5, "time": "2026-06-26T20:30:00Z"}
+    }
+  }
+}
+```
+
+Rules:
+
+- Only `alpaca data multi-snapshots` is used; never place orders or print credentials.
+- All fields except `symbol` are optional — a partial snapshot (e.g. `daily_bar` only) is valid.
+- Snapshot writes to `result.supplemental.snapshots` (summary) and each `symbol.supplemental.snapshot` (detail).
+- `status=unavailable` is a valid non-blocking state; scoring continues without it.
+
 ## Artifact: bars
 
 Purpose: provide reproducible offline market data for `--input`.
@@ -255,6 +290,7 @@ python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind news_context news
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind account_context account_context.json
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind finnhub_context finnhub_context.json
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind bars bars.json
+python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind snapshot_context snapshot_context.json
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind result result.json
 ```
 

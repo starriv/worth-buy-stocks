@@ -36,6 +36,7 @@ import argparse
 import datetime
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 # 向后兼容再导出：保持 `import indicators as I` 的旧访问路径可用。
 from fetching import (  # noqa: F401
@@ -43,6 +44,7 @@ from fetching import (  # noqa: F401
     _fetch_feed,
     _is_feed_limit,
     fetch_bars,
+    fetch_snapshots,
 )
 from finnhub import (  # noqa: F401
     fetch_finnhub_context,
@@ -86,11 +88,26 @@ from agent_contracts import (  # noqa: E402
     KIND_FINNHUB,
     KIND_NEWS,
     KIND_RESULT,
+    KIND_SNAPSHOT,
     ContractError,
     validate_payload,
 )
 
 BENCHMARK_SYMBOLS = ("SPY", "QQQ")
+
+
+def _gather_parallel(*thunks):
+    """并行运行多个采集 thunk，各自独立失败，按输入顺序返回结果。
+
+    bars / account / finnhub 三段采集互相独立且都是网络 I/O；并行能把它们
+    的耗时从串行相加压到最慢的一段。任一 thunk 抛异常只影响自身返回值
+    （调用方已对失败做降级处理），不会拖垮其他段。
+    """
+    if not thunks:
+        return ()
+    with ThreadPoolExecutor(max_workers=len(thunks)) as ex:
+        futures = [ex.submit(t) for t in thunks]
+        return tuple(f.result() for f in futures)
 
 
 def _validate_or_drop(kind, payload, label):
@@ -204,6 +221,31 @@ def _finnhub_context_from_args(args, symbols):
     return ctx
 
 
+def _load_snapshot_context(path):
+    """Load optional snapshot supplemental context JSON for offline tests/replay."""
+    if not path:
+        return None
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if not _validate_or_drop(KIND_SNAPSHOT, data, "--snapshot-context-file"):
+        return {"status": "unavailable", "reason": "snapshot_context 契约校验失败"}
+    return data
+
+
+def _snapshot_context_from_args(args, symbols):
+    if args.snapshot_context_file:
+        return _load_snapshot_context(args.snapshot_context_file)
+    if args.snapshot == "off":
+        return None
+    # 离线模式默认不触网；除非显式 on
+    if args.input and args.snapshot != "on":
+        return None
+    ctx = fetch_snapshots(symbols, feed=args.feed, timeout=args.timeout)
+    if args.snapshot == "on" and ctx.get("status") != "ok":
+        raise RuntimeError(ctx.get("reason") or f"snapshot 读取失败: {ctx.get('status')}")
+    return ctx
+
+
 def main():
     p = argparse.ArgumentParser(description="Alpaca 日线技术指标计算")
     p.add_argument("--symbols", help="逗号分隔，建议含 SPY,QQQ")
@@ -235,6 +277,13 @@ def main():
     p.add_argument("--finnhub-news-days", type=int, default=30, help="Finnhub 新闻回看天数")
     p.add_argument("--finnhub-earnings-days", type=int, default=14, help="Finnhub 财报日历前看天数")
     p.add_argument("--finnhub-timeout", type=int, default=15, help="Finnhub 单次请求超时秒数")
+    p.add_argument(
+        "--snapshot",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="当日快照补充上下文：auto=非离线模式拉取当日最新价/报价/成交，on=失败时报错，off=关闭。只写入 supplemental，不参与 score",
+    )
+    p.add_argument("--snapshot-context-file", help="离线快照补充上下文 JSON")
     args = p.parse_args()
     llm_context = _load_llm_context(args.llm_context_file)
 
@@ -245,15 +294,19 @@ def main():
         symbols = _symbols_with_benchmarks(symbols, bars)
         if not symbols:
             p.error("未找到可分析 symbols")
-        account_context = _account_context_from_args(args)
-        finnhub_context = _finnhub_context_from_args(args, symbols)
+        # 离线 bars 已从文件读入；account / finnhub / snapshot 互相独立，并行拉取。
+        account_context, finnhub_context, snapshot_context = _gather_parallel(
+            lambda: _account_context_from_args(args),
+            lambda: _finnhub_context_from_args(args, symbols),
+            lambda: _snapshot_context_from_args(args, symbols),
+        )
         effective_llm_context = merge_llm_contexts(
             llm_context, llm_context_from_finnhub(finnhub_context)
         )
         result = build_result(
             symbols, bars, args.feed, args.adjustment,
             llm_context=effective_llm_context, account_context=account_context,
-            finnhub_context=finnhub_context,
+            finnhub_context=finnhub_context, snapshot_context=snapshot_context,
         )
     else:
         if not args.symbols:
@@ -266,18 +319,26 @@ def main():
         )
         if not symbols:
             p.error("非离线模式需要 --symbols")
-        account_context = _account_context_from_args(args)
-        finnhub_context = _finnhub_context_from_args(args, symbols)
+        # 四段采集互相独立、都是网络 I/O，并行拉取：耗时从四者相加压到最慢一段。
+        # snapshot/bars/account/finnhub 各自失败只降级自身，不阻断评分。
+        # 评分（build_result）依赖全部结果，放并行之后。
+        (account_context, finnhub_context, snapshot_context), (bars, used_feed, note) = _gather_parallel(
+            lambda: (
+                _account_context_from_args(args),
+                _finnhub_context_from_args(args, symbols),
+                _snapshot_context_from_args(args, symbols),
+            ),
+            lambda: fetch_bars(
+                symbols, start, end, args.feed,
+                args.adjustment, args.limit, args.timeout),
+        )
         effective_llm_context = merge_llm_contexts(
             llm_context, llm_context_from_finnhub(finnhub_context)
         )
-        bars, used_feed, note = fetch_bars(
-            symbols, start, end, args.feed,
-            args.adjustment, args.limit, args.timeout)
         result = build_result(
             symbols, bars, used_feed, args.adjustment, note,
             llm_context=effective_llm_context, account_context=account_context,
-            finnhub_context=finnhub_context,
+            finnhub_context=finnhub_context, snapshot_context=snapshot_context,
         )
 
     try:

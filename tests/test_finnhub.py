@@ -97,6 +97,30 @@ class TestFinnhubFetch(unittest.TestCase):
         self.assertEqual(ctx["status"], "rate_limited")
         self.assertTrue(ctx["symbols"]["AAPL"]["data_flags"])
 
+    def test_multi_symbol_parallel_preserves_input_order(self):
+        # 多 symbol 并行后，symbols 字典顺序必须与输入顺序一致（确定性）。
+        symbols = ["MSFT", "AAPL", "GOOG"]
+        with patch("finnhub.urllib.request.urlopen", _fake_urlopen):
+            ctx = F.fetch_finnhub_context(symbols, token="secret-token")
+        self.assertEqual(list(ctx["symbols"].keys()), symbols)
+        self.assertEqual(ctx["status"], "ok")
+        for sym in symbols:
+            self.assertEqual(ctx["symbols"][sym]["status"], "ok")
+
+    def test_multi_symbol_one_failure_does_not_block_others(self):
+        # 单 symbol 全端点失败只影响自身，不阻断其余 symbol 的采集。
+        def fail_aapl(req, timeout=15):  # noqa: ARG001
+            # symbol=AAPL 的所有端点都 429；其余 symbol 走正常 fake
+            if "symbol=AAPL" in req.full_url:
+                raise HTTPError(req.full_url, 429, "Too Many Requests", {}, io.BytesIO(b"limit"))
+            return _fake_urlopen(req, timeout)
+
+        with patch("finnhub.urllib.request.urlopen", fail_aapl):
+            ctx = F.fetch_finnhub_context(["MSFT", "AAPL"], token="secret-token")
+        self.assertEqual(ctx["status"], "ok")
+        self.assertEqual(ctx["symbols"]["MSFT"]["status"], "ok")
+        self.assertEqual(ctx["symbols"]["AAPL"]["status"], "rate_limited")
+
 
 class TestFinnhubNormalize(unittest.TestCase):
     def test_normalize_offline_context_uppercases_symbols(self):

@@ -17,6 +17,29 @@ from portfolio import context_for_symbol, summarize_account_context
 from scoring import score
 
 
+def _summarize_snapshot(snapshot_context: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Compact top-level summary for the supplemental snapshot block.
+
+    Only an ``ok`` snapshot writes a summary block; unavailable/missing snapshots
+    are silently omitted so they never leak into the result or block scoring.
+    """
+    if not isinstance(snapshot_context, dict) or snapshot_context.get("status") != "ok":
+        return None
+    symbols = snapshot_context.get("symbols") or {}
+    return {
+        "status": "ok",
+        "as_of": snapshot_context.get("as_of"),
+        "feed": snapshot_context.get("feed"),
+        "symbols_count": len(symbols),
+    }
+
+
+def _snapshot_for_symbol(snapshot_context: dict[str, Any] | None, symbol: str) -> dict[str, Any] | None:
+    if not isinstance(snapshot_context, dict) or snapshot_context.get("status") != "ok":
+        return None
+    return (snapshot_context.get("symbols") or {}).get(str(symbol or "").strip().upper())
+
+
 def build_result(
     symbols: list[str],
     bars: dict[str, list[dict[str, Any]]],
@@ -26,6 +49,7 @@ def build_result(
     llm_context: dict[str, dict[str, Any]] | None = None,
     account_context: dict[str, Any] | None = None,
     finnhub_context: dict[str, Any] | None = None,
+    snapshot_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """llm_context：可选 {symbol: {as_of/sources/red_flags/data_trust/catalyst}} 映射，按票传给
     score() 的非对称 LLM 风控 overlay。
@@ -34,6 +58,9 @@ def build_result(
     生成贴合当前持仓敞口的建议。默认 None → 纯价量管道，分数与回测完全不变。
 
     finnhub_context：可选 Finnhub 补充上下文；只写入 supplemental，不参与 score。
+
+    snapshot_context：可选当日快照补充上下文；只写入 supplemental（顶层 summary +
+    每个 symbol 明细），不参与 score。失败/缺失只省略该补充块，不阻断评分。
     """
     llm_context = llm_context or {}
     result: dict[str, Any] = {"feed": feed, "adjustment": adjustment, "symbols": {}}
@@ -45,6 +72,9 @@ def build_result(
     finnhub_summary = summarize_finnhub_context(finnhub_context)
     if finnhub_summary:
         result.setdefault("supplemental", {})["finnhub"] = finnhub_summary
+    snapshot_summary = _summarize_snapshot(snapshot_context)
+    if snapshot_summary:
+        result.setdefault("supplemental", {})["snapshots"] = snapshot_summary
     analyses: dict[str, dict[str, Any]] = {}
     for sym in symbols:
         sb = bars.get(sym)
@@ -68,6 +98,9 @@ def build_result(
             sym_finnhub = finnhub_context_for_symbol(finnhub_context, sym)
             if sym_finnhub:
                 a.setdefault("supplemental", {})["finnhub"] = sym_finnhub
+            sym_snapshot = _snapshot_for_symbol(snapshot_context, sym)
+            if sym_snapshot:
+                a.setdefault("supplemental", {})["snapshot"] = sym_snapshot
             # 相对强度就绪后再确定性打分（依赖 relative_strength_pct）
             s = score(
                 a,

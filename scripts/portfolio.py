@@ -7,6 +7,7 @@ It never creates/modifies orders and it strips account identifiers from output.
 import datetime
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 from utils import to_num as _num
 
@@ -139,15 +140,29 @@ def normalize_account_context(raw):
 
 
 def fetch_account_context(timeout=30):
-    """Fetch account and open positions through Alpaca CLI, then normalize."""
-    account = _run_json(
-        ["alpaca", "account", "get", "--quiet", "--timeout", str(timeout)],
-        timeout + 5,
-    )
-    positions = _run_json(
-        ["alpaca", "position", "list", "--quiet", "--timeout", str(timeout)],
-        timeout + 5,
-    )
+    """Fetch account and open positions through Alpaca CLI, then normalize.
+
+    The two CLI calls (account get + position list) are independent network I/O,
+    so they run in parallel via a 2-worker thread pool. Either failing raises to
+    the caller, which already degrades account overlay to unavailable.
+    """
+    def _account():
+        return _run_json(
+            ["alpaca", "account", "get", "--quiet", "--timeout", str(timeout)],
+            timeout + 5,
+        )
+
+    def _positions():
+        return _run_json(
+            ["alpaca", "position", "list", "--quiet", "--timeout", str(timeout)],
+            timeout + 5,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        account_fut = ex.submit(_account)
+        positions_fut = ex.submit(_positions)
+        account = account_fut.result()
+        positions = positions_fut.result()
     return normalize_account_context({"account": account, "positions": positions})
 
 
