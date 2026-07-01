@@ -167,6 +167,31 @@ python3 "$SKILL_DIR/scripts/chart.py" --symbol {TICKER} --feed "$FEED" --count 3
 alpaca asset get --symbol-or-asset-id {TICKER} --quiet
 ```
 
+## 全市场扫描
+
+当用户要"扫全市场找今天能买的"时，用 `scripts/scanner.py` 一条命令完成，不要再手动拼 asset list → snapshot → indicators 多步。扫描器内部复用 `build_result` 做两轮评分：精简轮（无 overlay）对流动性初筛后的活跃池批量评分、提取 `verdict=="是"`（已隐含 `confirmation.ok`）；复核轮仅对候选开 Finnhub 新闻 overlay，把被软红旗降级（是→观察）的剔到 `downgraded`。
+
+```bash
+python3 "$SKILL_DIR/scripts/scanner.py" --feed "$FEED" --adjustment split --top 20
+```
+
+流程：取股池（`alpaca asset list` NYSE+NASDAQ 活跃普通股）→ 流动性初筛（snapshot 的 IEX 日成交量 ≥ `--min-volume` 默认 5 万、价 ≥ `--min-price` 默认 5）→ 精简批量评分 → 提取 `是` 候选 → 新闻复核降级。输出 JSON 含 `candidates`（最终可买，按 composite 降序）、`downgraded`（被新闻面降级的原"是"，带 `cap_applied` 与 `downgrade_reasons`）、`market_regime`、`counts`。
+
+关键 flag：
+
+| Flag | 默认 | 作用 |
+|------|------|------|
+| `--verify-news auto\|on\|off` | `auto` | auto=有 `FINNHUB_API_KEY` 才对候选跑新闻复核降级；off=只输出精简轮全部"是"（会漏掉被软红旗降级的） |
+| `--exchange NYSE,NASDAQ` | `NYSE,NASDAQ` | 股池来源交易所 |
+| `--min-price` / `--min-volume` | `5` / `50000` | 流动性初筛阈值（IEX 量约为全市场 2-3%） |
+| `--snapshot-chunk` / `--bars-chunk` | `200` / `80` | snapshot / multi-bars 分块大小 |
+| `--top` | `20` | 候选列表上限 |
+| `--symbols` / `--symbols-file` | 无 | 覆盖股池（跳过 asset list，用于复盘） |
+| `--input` | 无 | 离线复盘：读预取 JSON `{assets,snapshots,bars,finnhub}`，不触网 |
+| `--notify on` | `off` | 把摘要推 Telegram |
+
+`--verify-news` 复核这一步必须做（默认 auto 已开）：Finnhub 自动红旗会把标题含"investigation/litigation/dilution"等的"是"候选降级为"观察"，漏掉这步会高估可买数量。扫描结果汇报仍遵循"输出格式"7 段，对每只候选单独展开。
+
 ## 新闻面风控
 
 新闻面是 `score.llm_overlay` 的输入，只做 `min(cap)` 封顶：

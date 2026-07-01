@@ -3,8 +3,8 @@
 
 The skill keeps credentials out of source and output. This module reads the
 skill-root `.env` file when present, without printing values. Values in `.env`
-take precedence over process environment variables so hooks do not accidentally
-inherit unrelated global credentials.
+take precedence over process environment variables so local tools do not
+accidentally inherit unrelated global credentials.
 """
 import os
 
