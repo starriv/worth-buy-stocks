@@ -187,3 +187,7 @@ $RECYCLE.BIN/
 .directory
 .Trash-*
 .nfs*
+
+# Local run artifacts
+*.out
+*.err

@@ -5,4 +5,4 @@
 interface:
   display_name: "值得买 - 股票版"
   short_description: "多 agent 采集 + Alpaca 确定性评分"
-  default_prompt: "用 $worth-buy-stocks 评估 AAPL 是否值得买：并行采集新闻、Finnhub 和只读持仓上下文，最后以 scripts/indicators.py 的评分为准，按 SKILL.md 的 7 个固定标题输出完整交易纪律建议、风控过滤表和交易计划。"
+  default_prompt: "用 $worth-buy-stocks 评估 AAPL 是否值得买：结合最近 30 天新闻面和只读持仓敞口，以脚本评分为准，输出完整交易纪律建议、风控过滤表和交易计划。"

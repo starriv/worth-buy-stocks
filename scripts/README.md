@@ -45,7 +45,7 @@
                             ▲
   indicators.py ◄── fetching, finnhub, metrics, analysis, scoring, portfolio   CLI 入口 + 向后兼容再导出
   fetching.py               Alpaca 日线拉取（分页/去重/feed 回退），无内部依赖
-  local_env.py              skill 根目录 .env 解析（凭证只读，不输出）
+  local_env.py              本地 .env 解析（override → skill 根目录 → XDG 配置目录；凭证只读，不输出）
   finnhub.py                Finnhub quote/news/profile/earnings 可选补充上下文 + 保守新闻红旗提炼
   portfolio.py              Alpaca 账户/持仓只读读取与归一化（account/positions）
 
@@ -90,12 +90,8 @@
 Artifact 契约见 `../references/agent-contracts.md`。新增或修改 sub-agent 输出形状时，先更新该 reference，再补 `agent_contracts.py` 和测试。合并前可运行：
 
 ```bash
-python3 scripts/validate_agent_contract.py --kind news_context news_context.json
-python3 scripts/validate_agent_contract.py --kind account_context account_context.json
-python3 scripts/validate_agent_contract.py --kind finnhub_context finnhub_context.json
-python3 scripts/validate_agent_contract.py --kind bars bars.json
-python3 scripts/validate_agent_contract.py --kind snapshot_context snapshot_context.json
-python3 scripts/validate_agent_contract.py --kind result result.json
+# kind: news_context / account_context / finnhub_context / bars / snapshot_context / result
+python3 scripts/validate_agent_contract.py --kind <kind> <artifact>.json
 ```
 
 校验失败的可选 overlay 不进入评分链路；核心 bars 校验失败则本轮无法评分。
@@ -230,7 +226,7 @@ suggested_position_pct = min(目标波动(20%) / 实现年化波动 × 信号强
 
 ### Finnhub 补充上下文
 
-`finnhub.py` 通过 Finnhub REST API 只读获取 quote、company-news、profile2、earnings-calendar。API key 优先从 skill 根目录 `.env` 的 `FINNHUB_API_KEY` 读取，环境变量作为 fallback；`--finnhub-context auto` 在没有 key 或离线 `--input` 时不触网。
+`finnhub.py` 通过 Finnhub REST API 只读获取 quote、company-news、profile2、earnings-calendar。API key 从本地 `.env` 的 `FINNHUB_API_KEY` 读取（查找顺序：`WORTH_BUY_STOCKS_ENV_FILE` → skill 根目录 `.env` → `~/.config/worth-buy-stocks/.env`），环境变量作为 fallback；`--finnhub-context auto` 在没有 key 或离线 `--input` 时不触网。
 
 Finnhub 原始补充输出写入 `supplemental.finnhub`，不参与 `score.composite`：
 
@@ -312,7 +308,7 @@ Spearman 秩相关不对收益的分布形态做假设。单只股票 3 个月�
 |------|------|------|
 | `metrics.py` | EMA/MACD/RSI/KDJ/均线/收益率/周线聚合；量化因子：年化波动、最大回撤、ATR、效率比、对数价格回归、12-1 动量 | 库 |
 | `fetching.py` | `alpaca data multi-bars` 拉日线（分页、去重、sip→iex 回退）+ `alpaca data multi-snapshots` 当日快照归一化（`fetch_snapshots`） | 库 |
-| `local_env.py` | 解析 skill 根目录 `.env`，让 Finnhub/Telegram 凭证优先从本地文件读取，环境变量作为 fallback | 库 |
+| `local_env.py` | 解析本地 `.env`（override 路径 → skill 根目录 → `~/.config/worth-buy-stocks/`），让 Finnhub/Telegram 凭证优先从本地文件读取，环境变量作为 fallback | 库 |
 | `finnhub.py` | Finnhub quote/news/profile/earnings 可选补充上下文，多 symbol 并行拉取（`ThreadPoolExecutor`），过滤 token，结构化 HTTP 错误，并把明确负面新闻/临近财报压缩为 `llm_context` 候选 | 库 |
 | `portfolio.py` | `alpaca account get` / `position list` 只读读取账户敞口和持仓（两次 CLI 调用并行），过滤账号标识 | 库 |
 | `analysis.py` | `analyze_symbol`（单票全字段）+ `relative_strength`（跨票相对强度） | 库 |
@@ -369,7 +365,7 @@ python3 scripts/scanner.py --verify-news off
 # 离线复盘：喂预取 JSON {assets,snapshots,bars,finnhub}，不触网
 python3 scripts/scanner.py --input scan_fixture.json --verify-news off
 
-# 推送（优先读取 skill 根目录 .env 的 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID）
+# 推送（读取本地 .env 的 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，位置见 local_env.py）
 printf '%s' "结论文本" | python3 scripts/notify_telegram.py
 
 # 回测（触网，较慢；输出纯统计，看方向不看绝对收益）

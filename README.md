@@ -29,7 +29,7 @@ ALPHA 加权层 (排名分)  →  风险否决层 (封顶)  →  确认 overlay 
 
 ## 依赖
 
-仅支持美股，主价量数据来源为 [Alpaca Markets](https://alpaca.markets/)，需先开户并配置 [Alpaca Skill](https://alpaca.markets/blog/alpaca-launches-skills-library-for-ai-agents/)。可选在 skill 根目录 `.env` 设置 `FINNHUB_API_KEY` 读取 Finnhub 补充上下文；Telegram 推送同样优先读取该 `.env`。
+仅支持美股，主价量数据来源为 [Alpaca Markets](https://alpaca.markets/)，需先开户并配置 [Alpaca Skill](https://alpaca.markets/blog/alpaca-launches-skills-library-for-ai-agents/)。可选在本地 `.env`（skill 根目录或 `~/.config/worth-buy-stocks/.env`）设置 `FINNHUB_API_KEY` 读取 Finnhub 补充上下文；Telegram 推送同样读取该 `.env`。
 
 ## 广告
 
