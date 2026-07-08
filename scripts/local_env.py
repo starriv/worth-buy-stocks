@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Local .env reader for optional provider credentials.
 
-The skill keeps credentials out of source and output. This module reads the
-skill-root `.env` file when present, without printing values. Values in `.env`
+The skill keeps credentials out of source and output. This module reads a
+local `.env` file when present, without printing values. Values in `.env`
 take precedence over process environment variables so local tools do not
 accidentally inherit unrelated global credentials.
+
+Lookup order: `WORTH_BUY_STOCKS_ENV_FILE` override, then the skill-root
+`.env` if it exists, then `~/.config/worth-buy-stocks/.env` (respecting
+`XDG_CONFIG_HOME`) so credentials can live outside the repo.
 """
 import os
 
@@ -13,8 +17,20 @@ DEFAULT_ENV_PATH = os.path.join(SKILL_ROOT, ".env")
 ENV_PATH_OVERRIDE = "WORTH_BUY_STOCKS_ENV_FILE"
 
 
+def user_config_env_path():
+    base = os.environ.get("XDG_CONFIG_HOME", "").strip() or os.path.join(
+        os.path.expanduser("~"), ".config"
+    )
+    return os.path.join(base, "worth-buy-stocks", ".env")
+
+
 def env_path():
-    return os.environ.get(ENV_PATH_OVERRIDE, "").strip() or DEFAULT_ENV_PATH
+    override = os.environ.get(ENV_PATH_OVERRIDE, "").strip()
+    if override:
+        return override
+    if os.path.isfile(DEFAULT_ENV_PATH):
+        return DEFAULT_ENV_PATH
+    return user_config_env_path()
 
 
 def _strip_unquoted_comment(value):

@@ -50,6 +50,26 @@ class TestLocalEnv(unittest.TestCase):
         with patch.dict(os.environ, {E.ENV_PATH_OVERRIDE: path}, clear=True):
             self.assertEqual(E.get_env("FINNHUB_API_KEY"), "file-token")
 
+    def test_env_path_prefers_skill_root_when_present(self):
+        path = self._env_file("FINNHUB_API_KEY=root-token\n")
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(E, "DEFAULT_ENV_PATH", path):
+                self.assertEqual(E.env_path(), path)
+
+    def test_env_path_falls_back_to_user_config(self):
+        config_dir = tempfile.mkdtemp()
+        env_dir = os.path.join(config_dir, "worth-buy-stocks")
+        os.makedirs(env_dir)
+        config_env = os.path.join(env_dir, ".env")
+        with open(config_env, "w", encoding="utf-8") as f:
+            f.write("FINNHUB_API_KEY=xdg-token\n")
+        self.addCleanup(lambda: os.path.exists(config_env) and os.unlink(config_env))
+        missing_root = os.path.join(config_dir, "no-such-.env")
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": config_dir}, clear=True):
+            with patch.object(E, "DEFAULT_ENV_PATH", missing_root):
+                self.assertEqual(E.env_path(), config_env)
+                self.assertEqual(E.get_env("FINNHUB_API_KEY"), "xdg-token")
+
 
 if __name__ == "__main__":
     unittest.main()
