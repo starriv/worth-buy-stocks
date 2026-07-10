@@ -1,50 +1,180 @@
-# 什么值得买 - 股票版
+# 什么值得买 · 美股版
 
-> **理念：做趋势。** 只参与已被市场验证的方向，不猜底、不博反弹、不和趋势对抗。 抄底会错无数次，追高只会错一次
+把趋势交易纪律落成一套可复现的美股评分流程。它回答的不是“这家公司好不好”，而是：**按当前价量结构、市场环境和风险约束，现在是否适合参与。**
 
-通过多因子量化分析判断股票是否值得买入，买之前问一问防止冲动金融消费。支持单股评分和全市场扫描（取 NYSE/NASDAQ 股池 → 流动性初筛 → 批量评分 → 新闻复核降级，找出今天符合纪律的候选）。
+支持单股分析和全市场扫描。输出包括纪律评分、明确结论、计划价位、账户敞口建议、事件风险和 K 线图。
 
-脚本会在可用时只读 Alpaca 账户持仓，把当前敞口、成本和浮盈亏纳入建议，并输出参考入场价、保护性出场价和止盈价。Finnhub 可作为可选补充数据源，用于 quote/news/profile/earnings 核验和事件风险识别；其中新闻/财报只会生成降级候选，不会把标的加分或升级。Claude AI 意见是评分完成后的独立对照，只展示"量价纪律结论 vs AI 判断"的异同，不参与评分。
+## 能做什么
+
+- 评估单只美股：`是`、`观察`、`否`、`持仓需减风险`或 `无法评分`。
+- 扫描 NYSE / NASDAQ，先做流动性过滤，再筛出符合纪律的候选。
+- 只读 Alpaca 账户和持仓，把当前仓位、成本及浮盈亏纳入操作建议。
+- 检查近 30 天新闻、公告和财报日历；事件风险可以降级结论，利好不加分。
+- 生成入场、回踩、止损、2R / 3R 止盈和追价上限。
+- 输出终端 K 线与自包含 HTML 图；可选展示 Claude 第二意见作对照。
+
+## 快速使用
+
+安装到 Codex skills 目录：
+
+```bash
+mkdir -p ~/.codex/skills
+git clone https://github.com/starriv/worth-buy-stocks.git \
+  ~/.codex/skills/worth-buy-stocks
+```
+
+准备 Python 3.10+、Alpaca CLI 和可读取美股行情的 Alpaca 凭证。完整配置见[本地环境设置清单](references/setup.md)。
+
+然后直接对 Codex 说：
+
+```text
+值得买吗 NVDA
+分析 AAPL，结合我的 Alpaca 持仓和最近 30 天新闻
+扫全市场，找今天符合纪律的候选
+简单看一下 MSFT，只给结论
+```
+
+也可以直接运行脚本：
+
+```bash
+# 单股评分；SPY、QQQ 用于市场环境和相对强度比较
+python3 scripts/indicators.py --symbols NVDA,SPY,QQQ
+
+# 全市场扫描
+python3 scripts/scanner.py --top 20
+```
+
+## 输出示例
+
+![单股分析输出：K 线图与书面交易决策](docs/demo-output.svg)
+
+完整分析按固定结构输出：结论、关键证据、风控过滤条件、评分拆解、账户敞口与交易计划、新闻面风控、建议。需要简短回答时，可以只保留图表和结论。
 
 ## 实现原理
 
+### 单股分析流程
+
+```mermaid
+flowchart LR
+    classDef source fill:#EAF2FF,stroke:#4C6FFF,color:#172B4D,stroke-width:1.5px;
+    classDef engine fill:#FFF4D6,stroke:#C58A00,color:#3D2A00,stroke-width:1.5px;
+    classDef overlay fill:#F4ECFF,stroke:#8357C5,color:#2B1745,stroke-width:1.5px;
+    classDef result fill:#E8F7EE,stroke:#2F855A,color:#173D2A,stroke-width:1.5px;
+
+    subgraph DATA["数据采集"]
+        A["Alpaca 已完成日线<br/>个股 + SPY + QQQ"]
+        S["当日 Snapshot<br/>只用于补充展示"]
+        P["Alpaca 账户与持仓<br/>只读"]
+        N["新闻 / Finnhub<br/>事件与财报风险"]
+        X["Claude 第二意见<br/>可选"]
+    end
+
+    subgraph SCORE["确定性评分"]
+        B["① ALPHA 加权<br/>动量 55 · 相对强度 35 · 趋势效率 10"]
+        C["② 风险否决<br/>关键均线 · 周线 · 大盘环境"]
+        D["③ 技术确认<br/>技术状态 · 量价 · 趋势质量"]
+        E["④ 入场时机<br/>过热降级 · 回调拐点"]
+        B --> C --> D --> E
+    end
+
+    subgraph CONTROL["独立约束"]
+        R["事件风险<br/>只降级，不加分"]
+        O["账户敞口<br/>调整操作建议"]
+        Q["AI 对照<br/>不改评分和结论"]
+    end
+
+    F["最终结论与交易计划"]
+    G["K 线图 + 书面决策"]
+
+    A --> B
+    N --> R --> F
+    P --> O --> F
+    E --> F
+    F --> Q
+    X --> Q
+    F --> G
+    Q --> G
+    S --> G
+
+    class A,S,P,N,X source;
+    class B,C,D,E engine;
+    class R,O,Q overlay;
+    class F,G result;
 ```
-数据采集（并行）            评分四层                    展示 overlay              输出
-bars / 只读持仓        →   ALPHA 加权层  →  风险否决层   →   账户敞口建议        →   终端 K 线 + 彩色 HTML 图
-Finnhub / snapshot         确认 overlay  →  入场时机层       AI 意见对照             交易计划 + 7 段书面决策
-各段独立失败降级           排名 + 否决 + 时机               只展示不改分            价格全部来自脚本
+
+评分分四层，各层职责分开：
+
+| 层         | 依据                                                | 作用                     |
+| ---------- | --------------------------------------------------- | ------------------------ |
+| ALPHA 加权 | 风险调整动量、相对 SPY / QQQ 强度、Kaufman 趋势效率 | 形成排名分               |
+| 风险否决   | MA60、MA200、周线结构、大盘 risk-off                | 封顶或否决，避免逆势开仓 |
+| 技术确认   | MACD、RSI、KDJ、量价和趋势质量                      | 只拦截买入，不给排名加分 |
+| 入场时机   | 过热程度、有序回调、完成日线反转信号                | 调整入场结论，不改排名分 |
+
+新闻面不是第五个评分因子。高风险事件会封顶或降级，利好、目标价和估值叙事不会把弱势标的升级。账户敞口只影响操作建议；AI 意见只用于对照。
+
+### 全市场扫描流程
+
+```mermaid
+flowchart LR
+    classDef base fill:#EAF2FF,stroke:#4C6FFF,color:#172B4D,stroke-width:1.4px;
+    classDef check fill:#FFF4D6,stroke:#C58A00,color:#3D2A00,stroke-width:1.4px;
+    classDef done fill:#E8F7EE,stroke:#2F855A,color:#173D2A,stroke-width:1.4px;
+
+    A["NYSE / NASDAQ<br/>活跃普通股"] --> B["价格与流动性初筛"]
+    B --> C["批量计算纪律评分"]
+    C --> D["提取达标候选"]
+    D --> E["新闻与财报风险复核"]
+    E --> F["最终候选<br/>按评分排序"]
+    E --> G["被风险降级的候选<br/>单独列出"]
+
+    class A,B base;
+    class C,D,E check;
+    class F,G done;
 ```
 
-评分四层：
+评分权重来自样本内回测和逐因子 IC 分析，但扩展到规则化宽票池后，排名优势未达到统计显著。这里的分数用于统一执行纪律，不应理解为已经验证的选股 alpha。详细证据和限制见 [Model Card](docs/model-card.md)。
 
-```
-ALPHA 加权层  →  风险否决层  →  确认 overlay  →  入场时机层
-  排名分来源       封顶/否决       技术量价确认       过热降级/拐点触发
- momentum 55      MA200/MA60      只挡买入          不改 composite
- rel_strength 35  周线/大盘
- efficiency 10    新闻面 min(cap)
-```
+## 数据与可选能力
 
-权重来自逐因子 IC 回测校准：风险调整动量、相对强度和趋势效率进入排名分。MACD/RSI/KDJ/量价等经典指标不进排名分，只做确认和风控解释。新闻面以 `min(cap)` 封顶方式进入评分——高危红旗封顶到 `否`、中危把 `是` 降为 `观察`，利好只回显不加分。第四层识别过热与强趋势内的有序回调拐点：过热把达标的 `是` 降级为 `观察` 等回踩，趋势资格完好且回调后放量反转的拐点可替代趋势热度确认；量能缺失时不允许拐点升级。
+| 能力                     | 来源或配置                               | 是否必需 | 对结论的影响                      |
+| ------------------------ | ---------------------------------------- | -------: | --------------------------------- |
+| 日线、基准和当日行情     | Alpaca CLI                               |       是 | 日线进入评分；Snapshot 只补充展示 |
+| 账户与持仓               | Alpaca 只读接口                          |       否 | 调整持仓和仓位建议，不改排名分    |
+| 公司新闻、资料和财报日历 | `FINNHUB_API_KEY`                        |       否 | 只识别降级风险                    |
+| AI 第二意见              | `ANTHROPIC_API_KEY` + `anthropic` SDK    |       否 | 只展示对照，不改结论              |
+| Telegram 推送            | `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` |       否 | 只发送结果                        |
 
-评分完成后输出终端 K 线（叠加入场/止损/止盈价位线）和同款彩色 HTML 图（自包含 SVG，含悬浮 OHLC，路径在回复中给出、自己点开），最终回复是固定 7 段的书面交易决策：结论、关键证据、风控过滤条件（8 行固定表）、评分拆解、账户敞口与交易计划、新闻面风控、建议。
+默认使用 Alpaca `iex` feed。只有账户具备 SIP 权限且明确需要时才切换到 `sip`。
 
-## 使用示例
+可选密钥从以下位置依次读取：
 
-问一句"值得买吗 NVDA"，得到的完整输出（示意图，数据为演示）：
+1. `WORTH_BUY_STOCKS_ENV_FILE` 指定的文件；
+2. skill 根目录下的 `.env`；
+3. `~/.config/worth-buy-stocks/.env`。
 
-![skill 输出示例：彩色 K 线 + 7 段书面决策](docs/demo-output.svg)
+不要把密钥提交到仓库，也不要发到对话中。未配置可选能力时，核心价量评分仍可运行。
 
-也可以直接问"扫全市场找今天能买的"，返回按评分降序的最终候选、被新闻面降级的原"是"和市场 regime。
+## 使用边界
 
-## 依赖
+- 仅支持 Alpaca 覆盖的美股标的。
+- 核心价量数据不足时返回 `无法评分`，不会用猜测补齐。
+- 全市场扫描是纪律过滤，不是收益预测或宽基选股 alpha 排名。
+- 当前校准主要是样本内结果，宽票池优势未被验证，也未经历完整熊市周期的样本外检验。
+- 部分阈值仍是手工设定，需继续通过前瞻日志验证。
+- 计划价位来自 ATR、均线和近 30 日结构，用于风险管理，不是订单指令。
 
-仅支持美股，主价量数据来源为 [Alpaca Markets](https://alpaca.markets/)，需先开户并配置 [Alpaca Skill](https://alpaca.markets/blog/alpaca-launches-skills-library-for-ai-agents/)。可选在本地 `.env` 设置补充凭证，查找顺序：`WORTH_BUY_STOCKS_ENV_FILE` 指定路径 → skill 根目录 `.env` → `~/.config/worth-buy-stocks/.env`。`FINNHUB_API_KEY` 用于读取 Finnhub 补充上下文；`ANTHROPIC_API_KEY`（并安装官方 `anthropic` SDK）用于生成 AI 对照意见；Telegram 推送读取 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`。均未配置时自动跳过，不影响价量评分。
+## 项目文档
 
-## 广告
+- [本地环境设置](references/setup.md)
+- [评分模型与校准证据](docs/model-card.md)
+- [脚本架构、命令和回测说明](scripts/README.md)
+- [并行采集数据契约](references/agent-contracts.md)
 
-我为 Alpaca 写了一个精美、简洁的 iOS 客户端，可配合使用：[Vicu](https://github.com/starriv/Vicu#)
+## 相关项目
+
+[Vicu](https://github.com/starriv/Vicu#) 是一个面向 Alpaca 的 iOS 客户端，可配合本 skill 查看账户与行情。
 
 ## 免责声明
 
-投资有风险,入市需谨慎,本工具仅参考用途,需要自己独立分析根据自己的实际情况使用. 祝愿大家一起发财
+本项目用于研究、纪律检查和交易复盘，不构成投资建议。市场有风险，请根据自己的目标、期限和风险承受能力独立决策。
