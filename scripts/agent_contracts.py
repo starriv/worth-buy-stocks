@@ -17,8 +17,9 @@ KIND_FINNHUB = "finnhub_context"
 KIND_BARS = "bars"
 KIND_SNAPSHOT = "snapshot_context"
 KIND_RESULT = "result"
+KIND_AI_OPINION = "ai_opinion"
 
-KINDS = (KIND_NEWS, KIND_ACCOUNT, KIND_FINNHUB, KIND_BARS, KIND_SNAPSHOT, KIND_RESULT)
+KINDS = (KIND_NEWS, KIND_ACCOUNT, KIND_FINNHUB, KIND_BARS, KIND_SNAPSHOT, KIND_RESULT, KIND_AI_OPINION)
 UNAVAILABLE_STATUSES = {"unavailable", "unauthorized", "rate_limited"}
 META_KEYS = {
     "contract_version", "kind", "status", "reason", "as_of", "provider",
@@ -199,7 +200,9 @@ def validate_result(payload: Any) -> dict[str, Any]:
         _expect("composite" in score, f"{sp}.score.composite", "composite is required")
         _expect(isinstance(score.get("blocking_reasons"), list), f"{sp}.score.blocking_reasons", "blocking_reasons must be a list")
         _expect(_is_obj(score.get("trade_plan")), f"{sp}.score.trade_plan", "trade_plan must be an object")
-        _expect(_is_obj(score.get("account_overlay")), f"{sp}.score.account_overlay", "account_overlay must be an object")
+        # account overlay 关闭/离线时 scoring 合法地输出 null（与 llm_overlay 惯例一致）
+        account_overlay = score.get("account_overlay")
+        _expect(account_overlay is None or _is_obj(account_overlay), f"{sp}.score.account_overlay", "account_overlay must be an object or null")
         scored += 1
     return {"symbols_count": len(symbols), "scored_symbols_count": scored}
 
@@ -226,6 +229,48 @@ def validate_snapshot(payload: Any) -> dict[str, Any]:
     return {"symbols_count": len(symbols)}
 
 
+AI_OPINION_STANCES = {"buy", "watch", "avoid"}
+AI_OPINION_CONFIDENCES = {"low", "medium", "high"}
+AI_OPINION_AGREEMENTS = {"agree", "diverge", "not_applicable"}
+
+
+def validate_ai_opinion(payload: Any) -> dict[str, Any]:
+    _expect(_is_obj(payload), "$", "ai_opinion must be an object")
+    status = _status(payload, "$")
+    if status != "ok":
+        return {"symbols_count": 0}
+    symbols = payload.get("symbols")
+    _expect(isinstance(symbols, dict), "$.symbols", "symbols must be an object")
+    opined = 0
+    for symbol, ctx in symbols.items():
+        sp = f"$.symbols.{symbol}"
+        _validate_symbol_key(str(symbol), sp)
+        _expect(_is_obj(ctx), sp, "symbol opinion must be an object")
+        ctx_status = _status(ctx, sp)
+        if ctx_status != "ok":
+            continue
+        _expect(
+            str(ctx.get("stance") or "").lower() in AI_OPINION_STANCES,
+            f"{sp}.stance",
+            "stance must be buy, watch, or avoid",
+        )
+        _expect(
+            str(ctx.get("confidence") or "").lower() in AI_OPINION_CONFIDENCES,
+            f"{sp}.confidence",
+            "confidence must be low, medium, or high",
+        )
+        _expect(bool(str(ctx.get("view") or "").strip()), f"{sp}.view", "view is required")
+        _expect(
+            str(ctx.get("agreement") or "").lower() in AI_OPINION_AGREEMENTS,
+            f"{sp}.agreement",
+            "agreement must be agree, diverge, or not_applicable",
+        )
+        if ctx.get("key_risks") is not None:
+            _expect(isinstance(ctx["key_risks"], list), f"{sp}.key_risks", "key_risks must be a list")
+        opined += 1
+    return {"symbols_count": len(symbols), "opined_symbols_count": opined}
+
+
 VALIDATORS = {
     KIND_NEWS: validate_news_context,
     KIND_ACCOUNT: validate_account_context,
@@ -233,6 +278,7 @@ VALIDATORS = {
     KIND_BARS: validate_bars,
     KIND_SNAPSHOT: validate_snapshot,
     KIND_RESULT: validate_result,
+    KIND_AI_OPINION: validate_ai_opinion,
 }
 
 

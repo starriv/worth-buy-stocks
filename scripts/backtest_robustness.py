@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fetching import _fetch_feed, FeedLimitError  # noqa: E402
 from metrics import ma  # noqa: E402
 from backtest_common import (  # noqa: E402
-    UNIVERSE, DELISTED, WARMUP, HISTORY_DAYS, load_panel, spearman, mean_t, quintile_spread,
+    UNIVERSE, DELISTED, SECTOR, WARMUP, HISTORY_DAYS,
+    load_panel, spearman, mean_t, quintile_spread, bootstrap_ci, sector_demean,
 )
 
 # 仍未纳入篮子的死亡名字（残余幸存者缺口）：SBNY 数据存疑、CREE 更名 WOLF，
@@ -39,9 +40,11 @@ def _ic_line(label, pairs, ic_list):
         print(f"   {label:16} 无样本")
         return
     qs = quintile_spread(pairs)
-    spread = f"{qs[0]:+.2f}%" if qs else "n/a"
+    spread = f"毛{qs[0]:+.2f}%/净{qs[1]:+.2f}%" if qs else "n/a"
     st = mean_t(ic_list)
-    icstr = f"IC {st[0]:+.3f} t≈{st[1]:+.2f} ({st[2]}期独立)" if st else "IC n/a"
+    ci = bootstrap_ci(ic_list)
+    cistr = f" 95%CI[{ci[0]:+.3f},{ci[1]:+.3f}]" if ci else ""
+    icstr = f"IC {st[0]:+.3f} t≈{st[1]:+.2f}{cistr} ({st[2]}期独立)" if st else "IC n/a"
     print(f"   {label:16} N={len(pairs):<5} 五分位多空 {spread:<9} {icstr}")
 
 
@@ -55,29 +58,36 @@ def run(feed, adjustment, timeout):
     for H in (21, 63):
         rebal_idx = list(range(WARMUP, len(panel.calendar) - H, H))  # 非重叠：步长=前瞻期
         groups = {"all": ([], []), "on": ([], []), "off": ([], [])}  # (pairs, ic_list)
+        # 行业中性平行组：前瞻收益按同期同行业去均值（检验 alpha 是否只是行业赌注）
+        sn_groups = {"all": ([], []), "on": ([], []), "off": ([], [])}
         for ti in rebal_idx:
             tdate = panel.calendar[ti]
             symbols = panel.scores_at(tdate)
             ron = regime.get(tdate)
             gkey = "on" if ron else "off"
-            ds, df = [], []
+            triples = []
             for s in UNIVERSE:
                 comp = (symbols.get(s, {}).get("score") or {}).get("composite")
                 fwd = panel.fwd_return_pct(s, ti, H)
                 if comp is None or fwd is None:
                     continue
-                groups["all"][0].append((comp, fwd))
-                groups[gkey][0].append((comp, fwd))
-                ds.append(comp)
-                df.append(fwd)
-            ic = spearman(ds, df)
-            if ic is not None:
-                groups["all"][1].append(ic)
-                groups[gkey][1].append(ic)
+                triples.append((comp, fwd, SECTOR.get(s, "unknown")))
+            pairs = [(c, f) for c, f, _ in triples]
+            sn_pairs = sector_demean(triples)
+            for gs, ps in ((groups, pairs), (sn_groups, sn_pairs)):
+                gs["all"][0].extend(ps)
+                gs[gkey][0].extend(ps)
+                ic = spearman([p[0] for p in ps], [p[1] for p in ps])
+                if ic is not None:
+                    gs["all"][1].append(ic)
+                    gs[gkey][1].append(ic)
         print(f"\n── 前瞻 {H} 交易日（独立 rebalance {len(rebal_idx)} 期）──")
         _ic_line("全样本", *groups["all"])
+        _ic_line("全样本·行业中性", *sn_groups["all"])
         _ic_line("risk-on", *groups["on"])
+        _ic_line("risk-on·行业中性", *sn_groups["on"])
         _ic_line("risk-off", *groups["off"])
+        _ic_line("risk-off·行业中性", *sn_groups["off"])
 
     _survivorship_probe(feed, adjustment, timeout)
     print("\n注：非重叠后 63 日独立样本很少（~7 期），显著性必然弱；regime 看 edge 是否在 "

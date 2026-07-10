@@ -106,6 +106,112 @@ class TestOtherContracts(unittest.TestCase):
         result = C.validate_payload(C.KIND_RESULT, payload)
         self.assertEqual(result["scored_symbols_count"], 1)
 
+    def test_result_allows_null_account_overlay_when_disabled(self):
+        payload = {
+            "symbols": {
+                "AAPL": {
+                    "score": {
+                        "verdict": "观察",
+                        "composite": 68.5,
+                        "blocking_reasons": [],
+                        "trade_plan": {},
+                        "account_overlay": None,
+                        "llm_overlay": None,
+                    }
+                }
+            }
+        }
+        result = C.validate_payload(C.KIND_RESULT, payload)
+        self.assertEqual(result["scored_symbols_count"], 1)
+
+    def test_result_rejects_non_object_account_overlay(self):
+        payload = {
+            "symbols": {
+                "AAPL": {
+                    "score": {
+                        "verdict": "观察",
+                        "composite": 68.5,
+                        "blocking_reasons": [],
+                        "trade_plan": {},
+                        "account_overlay": "unavailable",
+                    }
+                }
+            }
+        }
+        with self.assertRaises(C.ContractError):
+            C.validate_payload(C.KIND_RESULT, payload)
+
+
+class TestAiOpinionContract(unittest.TestCase):
+    def _ok_symbol(self, **overrides):
+        base = {
+            "status": "ok",
+            "stance": "buy",
+            "confidence": "medium",
+            "view": "趋势与相对强度均领先,量价确认充分",
+            "key_risks": ["财报临近"],
+            "agreement": "agree",
+            "model": "claude-opus-4-8",
+            "generated_at": "2026-07-08T00:00:00Z",
+        }
+        base.update(overrides)
+        return base
+
+    def test_ok_wrapper_with_multiple_symbols(self):
+        payload = {
+            "contract_version": C.CONTRACT_VERSION,
+            "kind": C.KIND_AI_OPINION,
+            "status": "ok",
+            "symbols": {
+                "AAPL": self._ok_symbol(),
+                "MSFT": self._ok_symbol(stance="watch", agreement="diverge"),
+            },
+        }
+        result = C.validate_payload(C.KIND_AI_OPINION, payload)
+        self.assertEqual(result["symbols_count"], 2)
+        self.assertEqual(result["opined_symbols_count"], 2)
+
+    def test_top_level_unavailable_is_valid(self):
+        payload = {
+            "contract_version": C.CONTRACT_VERSION,
+            "kind": C.KIND_AI_OPINION,
+            "status": "unavailable",
+            "reason": "ANTHROPIC_API_KEY not configured",
+        }
+        self.assertEqual(C.validate_payload(C.KIND_AI_OPINION, payload)["symbols_count"], 0)
+
+    def test_per_symbol_unavailable_is_valid(self):
+        payload = {
+            "status": "ok",
+            "symbols": {
+                "AAPL": self._ok_symbol(),
+                "MSFT": {"status": "unavailable", "reason": "api timeout"},
+            },
+        }
+        result = C.validate_payload(C.KIND_AI_OPINION, payload)
+        self.assertEqual(result["symbols_count"], 2)
+        self.assertEqual(result["opined_symbols_count"], 1)
+
+    def test_invalid_stance_rejected(self):
+        payload = {"status": "ok", "symbols": {"AAPL": self._ok_symbol(stance="strong_buy")}}
+        with self.assertRaises(C.ContractError):
+            C.validate_payload(C.KIND_AI_OPINION, payload)
+
+    def test_invalid_agreement_rejected(self):
+        payload = {"status": "ok", "symbols": {"AAPL": self._ok_symbol(agreement="maybe")}}
+        with self.assertRaises(C.ContractError):
+            C.validate_payload(C.KIND_AI_OPINION, payload)
+
+    def test_missing_view_rejected(self):
+        payload = {"status": "ok", "symbols": {"AAPL": self._ok_symbol(view="")}}
+        with self.assertRaises(C.ContractError):
+            C.validate_payload(C.KIND_AI_OPINION, payload)
+
+    def test_per_symbol_unavailable_requires_reason(self):
+        payload = {"status": "ok", "symbols": {"AAPL": {"status": "unavailable"}}}
+        with self.assertRaises(C.ContractError):
+            C.validate_payload(C.KIND_AI_OPINION, payload)
+
 
 class TestValidateCli(unittest.TestCase):
     def test_cli_returns_json_status(self):

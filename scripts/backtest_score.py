@@ -76,8 +76,9 @@ def _report(obs, ic_by_date):
                   else f"   {label:14} 无样本")
         qs = quintile_spread(pairs)
         if qs:
-            spread, top, bot = qs
-            print(f"   五分位: 最高分组 {top:+.2f}%  最低分组 {bot:+.2f}%  多空价差 {spread:+.2f}%")
+            gross, net, top, bot = qs
+            print(f"   五分位: 最高分组 {top:+.2f}%  最低分组 {bot:+.2f}%  "
+                  f"多空价差 毛 {gross:+.2f}% / 净 {net:+.2f}%（扣单边10bp×4）")
         st = mean_t(ic_by_date[h])
         if st:
             mic, t, ndays = st

@@ -18,7 +18,8 @@ from utils import to_num as _num
 BASE_URL = "https://finnhub.io/api/v1"
 TOKEN_ENV = "FINNHUB_API_KEY"
 BENCHMARK_SYMBOLS = {"SPY", "QQQ"}
-EARNINGS_EVENT_WINDOW_DAYS = 7
+EARNINGS_EVENT_WINDOW_DAYS = 14  # 财报事件提示窗口：8–14 天仅 low 提示，不封顶
+EARNINGS_SOFT_CAP_DAYS = 7       # ≤7 天 → medium 红旗，经 LLM overlay 封顶 74（「是」降级为「观察」）
 _FINNHUB_MAX_WORKERS = 8
 
 NEWS_RED_FLAG_RULES = [
@@ -404,8 +405,10 @@ def llm_context_from_finnhub(finnhub_context, today=None, max_news_flags=5):
     """Convert Finnhub supplemental context into the existing one-way llm_context.
 
     The mapping is intentionally conservative: explicit negative event keywords can
-    produce medium/high red flags; earnings-calendar events are low severity and do
-    not cap the score. Positive news is only ignored here, never used to upgrade.
+    produce medium/high red flags. Earnings-calendar events are deterministic event
+    risk: within EARNINGS_SOFT_CAP_DAYS they become a medium flag (caps 是→观察 via
+    the LLM overlay); 8-14 days out they stay low severity (informational only).
+    Positive news is only ignored here, never used to upgrade.
     """
     if not isinstance(finnhub_context, dict) or finnhub_context.get("status") != "ok":
         return {}
@@ -457,9 +460,14 @@ def llm_context_from_finnhub(finnhub_context, today=None, max_news_flags=5):
             if item.get("hour"):
                 note += f"（{item.get('hour')}）"
             catalyst_parts.append(note)
+            if days <= EARNINGS_SOFT_CAP_DAYS:
+                severity = "medium"  # 经 _llm_overlay 封顶 74：财报跳空是趋势前提的确定性破坏源
+                note += "——财报临近，趋势开仓纪律降级，待财报后趋势重新确认"
+            else:
+                severity = "low"
             red_flags.append({
                 "type": "earnings_event",
-                "severity": "low",
+                "severity": severity,
                 "note": note,
                 "source_id": source_id,
             })

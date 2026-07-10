@@ -48,6 +48,9 @@ alpaca position list --quiet
 ## 可选依赖
 
 - Finnhub API key:补充 quote/news/profile/earnings。从本地 `.env` 的 `FINNHUB_API_KEY` 读取;无 key 自动跳过。
+- AI 意见(Claude API):对评分结论生成对照展示用的 AI 第二意见,不参与评分。需要两项都满足才启用,缺任一项自动关闭、其余功能不受影响:
+  1. `pip install anthropic`(官方 SDK);
+  2. 本地 `.env` 配置 `ANTHROPIC_API_KEY`。
 - Telegram 推送:从本地 `.env` 读取 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`;仅在用户要求通知时需要。
 
 ## `.env` 位置

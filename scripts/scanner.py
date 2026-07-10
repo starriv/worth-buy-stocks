@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""全市场扫描：取股池 → 流动性初筛 → 精简批量评分 → 提取候选 → 新闻复核降级。
+"""全市场扫描：取股池 → 流动性初筛 → 精简批量评分 → 提取候选 → 新闻复核降级 → AI 第二意见。
 
 把"扫全市场找今天能买的"固化为一条命令。复用 ``pipeline.build_result`` 做两轮评分：
 
@@ -9,6 +9,7 @@
    把被软红旗降级（是→观察/否）的剔除到 ``downgraded``。
 
 精简轮关 overlay 先粗筛、再只对候选开 Finnhub，省 API 调用。日线在两轮间复用，不重复拉。
+AI 第二意见只对 top-N 截断后的最终候选逐票生成（只展示不评分），无 ANTHROPIC_API_KEY 时自动跳过。
 
 设计原则同 indicators.py：只读、不下单、不打印凭证；网络分段各自失败降级，不阻断核心评分；
 纯函数（过滤/提取/合并）与网络函数分离，纯函数可离线单测。
@@ -25,13 +26,19 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 # 本模块位于 scripts/，平级 import（与 indicators.py 一致）
-from fetching import fetch_bars, fetch_snapshots  # noqa: E402
+from fetching import _run_json, fetch_bars, fetch_snapshots  # noqa: E402
 from finnhub import (  # noqa: E402
     fetch_finnhub_context,
     has_api_key as finnhub_has_api_key,
     llm_context_from_finnhub,
 )
 from pipeline import build_result  # noqa: E402
+from ai_opinion import (  # noqa: E402
+    has_api_key as ai_opinion_has_api_key,
+    opinions_for_result,
+    sdk_available as ai_opinion_sdk_available,
+    unavailable_opinions,
+)
 
 BENCHMARK_SYMBOLS = ("SPY", "QQQ")
 # IEX 日成交量约为全市场 2-3%；5 万 IEX 股 ≈ 数百万股全市场，作活跃粗筛门槛。
@@ -107,10 +114,19 @@ def _candidate_row(sym: str, a: dict) -> dict:
     sc = a.get("score") or {}
     bd = sc.get("factor_breakdown") or {}
     tp = sc.get("trade_plan") or {}
+    et = a.get("entry_timing") or {}
     return {
         "symbol": sym,
         "composite": sc.get("composite"),
         "verdict": sc.get("verdict"),
+        "suggested_action": sc.get("suggested_action"),
+        "entry_timing": {
+            "classification": et.get("classification"),
+            "timing_score_pct": et.get("timing_score_pct"),
+            "ext_atr_above_ma20": et.get("ext_atr_above_ma20"),
+            "pullback_depth_pct": (et.get("pullback") or {}).get("depth_from_30d_high_pct"),
+            "bounce_signal_count": (et.get("bounce") or {}).get("signal_count"),
+        },
         "factor_breakdown": {
             k: (v.get("score_pct") if isinstance(v, dict) else None)
             for k, v in bd.items()
@@ -151,6 +167,14 @@ def extract_candidates(result: dict, top_n: int | None = None) -> list[dict]:
     return cands
 
 
+def _filter_entry(cands: list[dict], mode: str) -> list[dict]:
+    """按入场时机分类过滤候选（--entry）。all 原样返回。"""
+    if mode == "all":
+        return cands
+    want = "pullback_reversal" if mode == "pullback" else "trend_continuation"
+    return [c for c in cands if (c.get("entry_timing") or {}).get("classification") == want]
+
+
 def merge_news_downgrades(lean_candidates: list[dict], verified_result: dict) -> tuple[list[dict], list[dict]]:
     """对比精简轮候选与复核轮（带 llm_context）结果，分流 final / downgraded。
 
@@ -179,6 +203,43 @@ def merge_news_downgrades(lean_candidates: list[dict], verified_result: dict) ->
             })
     final.sort(key=lambda x: (-(x.get("composite") or 0), x["symbol"]))
     return final, downgraded
+
+
+def _attach_ai_opinions(final_candidates: list[dict], scored_result: dict,
+                        mode: str, llm_context: dict | None = None,
+                        offline: bool = False) -> str | None:
+    """对最终候选（top-N 截断后）逐票生成 AI 第二意见并附加到候选行。
+
+    只展示不评分：候选的 composite/verdict/排序在调用前已定型，本函数只往
+    每行追加 ``ai_opinion`` 字段。整体不可用返回 data_flag 文本（调用方决定
+    是否记录）；``mode=="on"`` 时不可用直接报错；单票失败由 ai_opinion 内部
+    降级为该票 ``status=unavailable``，不影响其他候选。
+    """
+    if not final_candidates or mode == "off":
+        return None
+    # 离线复盘保持不触网可复现；除非显式 on
+    if offline and mode != "on":
+        return None
+    if mode == "auto" and not (ai_opinion_sdk_available() and ai_opinion_has_api_key()):
+        return "未配置 ANTHROPIC_API_KEY，跳过 AI 意见（auto 模式）"
+    syms = [c["symbol"] for c in final_candidates]
+    sys.stderr.write(f"AI 意见: 对 {len(syms)} 个候选逐票调用，预计每票数十秒\n")
+    artifact = opinions_for_result(scored_result, llm_context=llm_context, symbols=syms)
+    if artifact.get("status") != "ok":
+        if mode == "on":
+            raise RuntimeError(artifact.get("reason") or "AI 意见生成失败")
+        return f"AI 意见不可用：{artifact.get('reason')}"
+    if mode == "on":
+        failures = unavailable_opinions(artifact, syms)
+        if failures:
+            detail = "；".join(f"{sym}: {reason}" for sym, reason in failures.items())
+            raise RuntimeError(f"AI 意见生成失败：{detail}")
+    entries = artifact.get("symbols") or {}
+    for cand in final_candidates:
+        entry = entries.get(cand["symbol"])
+        if entry:
+            cand["ai_opinion"] = entry
+    return None
 
 
 def _verdict_dist(result: dict) -> dict[str, int]:
@@ -210,21 +271,6 @@ def _market_regime(result: dict) -> dict:
 # 网络函数
 # ----------------------------------------------------------------------------
 
-def _run_json(cmd: list[str], timeout: int) -> Any:
-    """跑 alpaca CLI 子进程并解析 JSON stdout；非零退出抛 RuntimeError。"""
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    if res.returncode != 0:
-        detail = (res.stderr.strip() or res.stdout.strip() or "unknown error").replace("\n", " ")
-        raise RuntimeError(detail[:300])
-    text = res.stdout.strip()
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"无法解析 alpaca 输出为 JSON: {e}; 输出前 200 字符: {text[:200]!r}")
-
-
 def fetch_active_assets(exchanges=("NYSE", "NASDAQ"), asset_class="us_equity", timeout=30) -> list[dict]:
     """从 ``alpaca asset list`` 取活跃美股原始字典列表（每个交易所一次调用）。"""
     out: list[dict] = []
@@ -249,15 +295,29 @@ def fetch_active_assets(exchanges=("NYSE", "NASDAQ"), asset_class="us_equity", t
 
 def fetch_liquidity(symbols: list[str], feed: str, min_price: float, min_volume: float,
                     chunk: int = DEFAULT_SNAPSHOT_CHUNK, timeout: int = 30) -> tuple[list[dict], list[str]]:
-    """分块拉 snapshot 并按流动性过滤。返回 (pool, data_flags)。单块失败跳过不阻断。"""
+    """分块拉 snapshot 并按流动性过滤。返回 (pool, data_flags)。单块失败跳过不阻断。
+
+    分块之间并行（ThreadPoolExecutor），耗时从「各 chunk 之和」降到「最慢 chunk」。
+    """
     syms = [s for s in (symbols or []) if s]
+    if not syms:
+        return [], []
+    batches = [syms[i:i + chunk] for i in range(0, len(syms), chunk)]
     data_flags: list[str] = []
     merged: dict[str, dict] = {}
-    for i in range(0, len(syms), chunk):
-        batch = syms[i:i + chunk]
+
+    def _one(i_batch):
+        i, batch = i_batch
         ctx = fetch_snapshots(batch, feed=feed, timeout=timeout)
+        return i, ctx
+
+    workers = max(1, min(len(batches), 8))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_one, (idx, b)) for idx, b in enumerate(batches)]
+        results: list[tuple[int, dict]] = [f.result() for f in futures]
+    for _idx, ctx in sorted(results, key=lambda x: x[0]):
         if ctx.get("status") != "ok":
-            data_flags.append(f"snapshot 分块 {i}-{i+len(batch)} 拉取失败已跳过: {ctx.get('reason')}")
+            data_flags.append(f"snapshot 分块拉取失败已跳过: {ctx.get('reason')}")
             continue
         for sym, snap in (ctx.get("symbols") or {}).items():
             merged[sym] = snap
@@ -268,16 +328,31 @@ def fetch_liquidity(symbols: list[str], feed: str, min_price: float, min_volume:
 
 def fetch_pool_bars(symbols: list[str], start: str, end: str, feed: str, adjustment: str,
                     chunk: int = DEFAULT_BARS_CHUNK, timeout: int = 30) -> tuple[dict, list[str]]:
-    """分块拉两年日线，合并 {symbol: [bar]}。SPY/QQQ 若缺失单独补拉（regime 依赖）。"""
+    """分块拉两年日线，合并 {symbol: [bar]}。SPY/QQQ 若缺失单独补拉（regime 依赖）。
+
+    分块之间并行（ThreadPoolExecutor），耗时从「各 chunk 之和」降到「最慢 chunk」。
+    """
     syms = [s for s in (symbols or []) if s]
+    if not syms:
+        return {}, []
     bars: dict[str, list] = {}
     data_flags: list[str] = []
-    for i in range(0, len(syms), chunk):
-        batch = syms[i:i + chunk]
+    batches = [syms[i:i + chunk] for i in range(0, len(syms), chunk)]
+
+    def _one(batch):
         try:
-            chunk_bars, _used, _note = fetch_bars(batch, start, end, feed, adjustment, 10000, timeout)
+            b_bars, _used_feed, _note = fetch_bars(batch, start, end, feed, adjustment, 10000, timeout)
+            return b_bars, None
         except Exception as e:  # noqa: BLE001
-            data_flags.append(f"bars 分块 {i}-{i+len(batch)} 拉取失败已跳过: {e}")
+            return None, f"bars 分块拉取失败已跳过: {e}"
+
+    workers = max(1, min(len(batches), 8))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_one, b) for b in batches]
+        results = [f.result() for f in futures]
+    for chunk_bars, err in results:
+        if err:
+            data_flags.append(err)
             continue
         bars.update(chunk_bars)
     # 确保基准在列（build_result 的 market_risk_off 依赖 SPY.above_MA200）
@@ -320,7 +395,7 @@ def _ensure_benchmarks(symbols: list[str]) -> list[str]:
 
 
 def _today_iso() -> str:
-    return datetime.date.today().isoformat()
+    return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
 
 
 def scan(args) -> dict:
@@ -329,7 +404,7 @@ def scan(args) -> dict:
     adjustment = args.adjustment
     as_of = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     data_flags: list[str] = []
-    today_d = datetime.date.today()
+    today_d = datetime.datetime.now(datetime.timezone.utc).date()
     today = today_d.isoformat()
 
     # ---- 1. 股池 ----
@@ -368,12 +443,16 @@ def scan(args) -> dict:
     verdict_dist = _verdict_dist(lean_result)
 
     # ---- 4. 提取候选 ----
-    candidates = extract_candidates(lean_result, top_n=None)
+    lean_candidates = extract_candidates(lean_result, top_n=None)
+    # --entry 是候选资格过滤，必须在 Finnhub 复核前执行，避免对不会进入结果的
+    # 另一类时机候选消耗新闻 API 配额。top-N 仍在新闻后截断，以便降级后回补。
+    candidates = _filter_entry(lean_candidates, args.entry)
 
     # ---- 5. 新闻复核降级 ----
     downgraded: list[dict] = []
     verify = args.verify_news
     do_verify = verify == "on" or (verify == "auto" and finnhub_has_api_key())
+    scored_result, cand_llm_ctx = lean_result, None
     if do_verify and candidates:
         cand_syms = _ensure_benchmarks([c["symbol"] for c in candidates])
         finnhub_ctx = fetch_finnhub_context(
@@ -387,6 +466,7 @@ def scan(args) -> dict:
             llm_context=llm_ctx, finnhub_context=finnhub_ctx,
         )
         final_candidates, downgraded = merge_news_downgrades(candidates, verified)
+        scored_result, cand_llm_ctx = verified, llm_ctx
     else:
         final_candidates = candidates
         if do_verify and not candidates:
@@ -397,6 +477,11 @@ def scan(args) -> dict:
     if args.top is not None:
         final_candidates = final_candidates[:args.top]
 
+    # ---- 6. AI 第二意见（仅最终候选；只展示不评分）----
+    ai_flag = _attach_ai_opinions(final_candidates, scored_result, args.ai_opinion, cand_llm_ctx)
+    if ai_flag:
+        data_flags.append(ai_flag)
+
     return {
         "as_of": as_of,
         "feed": feed,
@@ -406,7 +491,8 @@ def scan(args) -> dict:
             "universe": universe_count,
             "liquidity_pool": pool_count,
             "scored": len([s for s in score_syms if s not in BENCHMARK_SYMBOLS]),
-            "candidates_lean": len(candidates),
+            "candidates_lean": len(lean_candidates),
+            "candidates_entry_filtered": len(candidates),
             "verdict_dist": verdict_dist,
         },
         "market_regime": _market_regime(lean_result),
@@ -425,7 +511,7 @@ def _scan_offline(args) -> dict:
     feed = args.feed
     adjustment = args.adjustment
     as_of = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-    today_d = datetime.date.today()
+    today_d = datetime.datetime.now(datetime.timezone.utc).date()
 
     if args.symbols:
         pool_syms = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -440,10 +526,12 @@ def _scan_offline(args) -> dict:
     score_syms = _ensure_benchmarks(pool_syms)
     lean_result = build_result(score_syms, bars, feed, adjustment)
     verdict_dist = _verdict_dist(lean_result)
-    candidates = extract_candidates(lean_result, top_n=None)
+    lean_candidates = extract_candidates(lean_result, top_n=None)
+    candidates = _filter_entry(lean_candidates, args.entry)
 
     downgraded: list[dict] = []
     finnhub_ctx = data.get("finnhub")
+    scored_result, cand_llm_ctx = lean_result, None
     if args.verify_news != "off" and candidates and isinstance(finnhub_ctx, dict):
         llm_ctx = llm_context_from_finnhub(finnhub_ctx, today=today_d)
         cand_syms = _ensure_benchmarks([c["symbol"] for c in candidates])
@@ -452,11 +540,15 @@ def _scan_offline(args) -> dict:
             llm_context=llm_ctx, finnhub_context=finnhub_ctx,
         )
         final_candidates, downgraded = merge_news_downgrades(candidates, verified)
+        scored_result, cand_llm_ctx = verified, llm_ctx
     else:
         final_candidates = candidates
 
     if args.top is not None:
         final_candidates = final_candidates[:args.top]
+
+    # 离线复盘默认不触网；--ai-opinion on 时才对最终候选生成 AI 意见
+    _attach_ai_opinions(final_candidates, scored_result, args.ai_opinion, cand_llm_ctx, offline=True)
 
     return {
         "as_of": as_of,
@@ -468,7 +560,8 @@ def _scan_offline(args) -> dict:
             "universe": len(pool_syms) if args.symbols else len(filter_common_tickers(data.get("assets") or [])),
             "liquidity_pool": len(pool_syms),
             "scored": len([s for s in score_syms if s not in BENCHMARK_SYMBOLS]),
-            "candidates_lean": len(candidates),
+            "candidates_lean": len(lean_candidates),
+            "candidates_entry_filtered": len(candidates),
             "verdict_dist": verdict_dist,
         },
         "market_regime": _market_regime(lean_result),
@@ -488,8 +581,12 @@ def _build_args(argv=None) -> argparse.Namespace:
     p.add_argument("--snapshot-chunk", type=int, default=DEFAULT_SNAPSHOT_CHUNK)
     p.add_argument("--bars-chunk", type=int, default=DEFAULT_BARS_CHUNK)
     p.add_argument("--top", type=int, default=DEFAULT_TOP)
+    p.add_argument("--entry", choices=("all", "pullback", "trend"), default="all",
+                   help="按入场时机过滤候选：pullback=只要回调拐点，trend=只要趋势延续，all=不过滤")
     p.add_argument("--verify-news", choices=("auto", "on", "off"), default="auto",
                    help="auto=有 FINNHUB_API_KEY 才复核，on=强制复核，off=关闭")
+    p.add_argument("--ai-opinion", choices=("auto", "on", "off"), default="auto",
+                   help="仅对最终候选生成 AI 第二意见（只展示不评分）：auto=有 ANTHROPIC_API_KEY 才调用，on=失败时报错，off=关闭")
     p.add_argument("--finnhub-news-days", type=int, default=30)
     p.add_argument("--finnhub-earnings-days", type=int, default=14)
     p.add_argument("--finnhub-timeout", type=int, default=15)
@@ -517,10 +614,13 @@ def _summary_text(result: dict) -> str:
     lines.append("大盘: SPY %s risk_off=%s" % (mr.get("spy_verdict"), mr.get("market_risk_off")))
     if cands:
         lines.append("可买 %d:" % len(cands))
+        entry_label = {"pullback_reversal": "拐点", "trend_continuation": "延续"}
         for c in cands:
             tp = c.get("trade_plan") or {}
-            lines.append("  %s %s/100 入%s 止%s 止盈%s" % (
-                c["symbol"], c.get("composite"), tp.get("suggested_entry_price"),
+            tag = entry_label.get((c.get("entry_timing") or {}).get("classification"), "")
+            lines.append("  %s%s %s/100 入%s 止%s 止盈%s" % (
+                c["symbol"], f"[{tag}]" if tag else "", c.get("composite"),
+                tp.get("suggested_entry_price"),
                 tp.get("stop_loss_price"), tp.get("take_profit_price")))
     else:
         lines.append("无可买候选")

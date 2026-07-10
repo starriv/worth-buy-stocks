@@ -59,19 +59,54 @@ def _fetch_feed(symbols, start, end, feed, adjustment, limit, timeout):
     return {sym: [bymt[t] for t in sorted(bymt)] for sym, bymt in out.items()}
 
 
-def fetch_bars(symbols, start, end, feed, adjustment, limit, timeout):
-    """拉取日线；sip 等 feed 受限时自动回退 iex 一次。
+def _drop_unclosed_today(bars_map):
+    """盘中运行时剔除今天的未完成日线；收盘后原样保留。
 
-    返回 (bars_dict, used_feed, note)。note 为回退说明或 None。
+    盘中的当日 bar 只含开盘以来的部分量价，会污染 RSI/量能比/反转日检测等
+    末根敏感指标（SKILL 口径是"已完成日线"）。当日盘中信息由 snapshot
+    overlay 补充展示，不进评分。返回 (bars_map, note)。
     """
     try:
-        return _fetch_feed(symbols, start, end, feed, adjustment, limit, timeout), feed, None
+        from zoneinfo import ZoneInfo
+        now_et = datetime.datetime.now(ZoneInfo("America/New_York"))
+        market_closed = (now_et.hour, now_et.minute) >= (16, 5)
+        today = now_et.date().isoformat()
+    except Exception:  # 无 tzdata 时保守回退：UTC 21:05 前视为未收盘
+        now = datetime.datetime.now(datetime.timezone.utc)
+        market_closed = (now.hour, now.minute) >= (21, 5)
+        today = now.date().isoformat()
+    if market_closed:
+        return bars_map, None
+    dropped = False
+    out = {}
+    for sym, blist in bars_map.items():
+        if blist and str(blist[-1].get("t", ""))[:10] == today:
+            out[sym] = blist[:-1]
+            dropped = True
+        else:
+            out[sym] = blist
+    note = "盘中运行：今日日线未收盘，已剔除（评分基于最近一根已完成日线）" if dropped else None
+    return out, note
+
+
+def fetch_bars(symbols, start, end, feed, adjustment, limit, timeout):
+    """拉取日线；sip 等 feed 受限时自动回退 iex 一次；盘中剔除今日未完成 bar。
+
+    返回 (bars_dict, used_feed, note)。note 为回退/剔除说明或 None。
+    """
+    try:
+        bars = _fetch_feed(symbols, start, end, feed, adjustment, limit, timeout)
+        used_feed, note = feed, None
     except FeedLimitError as e:
         if feed.lower() == "iex":
             raise RuntimeError(f"iex feed 受限: {e}")
         note = f"{feed} feed 受限({e})，已回退 iex"
         bars = _fetch_feed(symbols, start, end, "iex", adjustment, limit, timeout)
-        return bars, "iex", note
+        used_feed = "iex"
+    bars, drop_note = _drop_unclosed_today(bars)
+    if drop_note:
+        note = f"{note}；{drop_note}" if note else drop_note
+    return bars, used_feed, note
 
 
 def _run_json(cmd, timeout):

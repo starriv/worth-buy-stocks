@@ -15,9 +15,9 @@ import sys
 from typing import Any
 
 from metrics import (
-    adx, annualized_return, annualized_vol, atr, efficiency_ratio, kdj, ma, macd,
-    max_drawdown, momentum_12_1, obv, pct_return, rsi, to_weekly, trend_regression,
-    up_day_volume_ratio, volume_ratio_ma, volume_trend_direction,
+    adx, annualized_return, annualized_vol, atr, efficiency_ratio, entry_timing, kdj,
+    ma, macd, max_drawdown, momentum_12_1, obv, pct_return, rsi, to_weekly,
+    trend_regression, up_day_volume_ratio, volume_ratio_ma, volume_trend_direction,
 )
 
 # 交易日窗口（约数）：1/3/6 个月、52 周
@@ -126,6 +126,7 @@ def analyze_symbol(bars: list[dict[str, Any]]) -> dict[str, Any]:
             # 高点回看实际根数；<252 说明历史不足一年，52w 口径名不副实，需谨慎解读
             "high_lookback_bars": high_52w_bars,
         },
+        "entry_timing": entry_timing(closes, highs, lows, vols),
         "macd": macd(closes),
         "rsi": {"RSI14": rsi(closes, 14), "RSI6": rsi(closes, 6)},
         "kdj": kdj(highs, lows, closes),

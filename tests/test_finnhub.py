@@ -198,21 +198,52 @@ class TestFinnhubLLMContext(unittest.TestCase):
         self.assertEqual(llm["AAPL"]["red_flags"][0]["type"], "dilution")
         self.assertEqual(llm["AAPL"]["sources"][0]["id"], "finnhub_news_6")
 
-    def test_nearby_earnings_is_low_severity_event_only(self):
+    @staticmethod
+    def _earnings_llm(earnings_date, today):
         ctx = F.normalize_finnhub_context({
             "symbols": {
                 "AAPL": {
                     "status": "ok",
-                    "earnings": [{"date": "2026-07-01", "hour": "amc"}],
+                    "earnings": [{"date": earnings_date, "hour": "amc"}],
                     "data_flags": [],
                 }
             }
         })
-        llm = F.llm_context_from_finnhub(ctx, today=date(2026, 6, 27))
+        return F.llm_context_from_finnhub(ctx, today=today)
+
+    def test_earnings_within_soft_cap_window_is_medium(self):
+        # 4 天后财报（≤7）→ medium，经 LLM overlay 封顶 74（是→观察）
+        llm = self._earnings_llm("2026-07-01", date(2026, 6, 27))
         rf = llm["AAPL"]["red_flags"][0]
         self.assertEqual(rf["type"], "earnings_event")
-        self.assertEqual(rf["severity"], "low")
+        self.assertEqual(rf["severity"], "medium")
         self.assertIn("2026-07-01", llm["AAPL"]["catalyst"])
+
+    def test_earnings_on_boundary_day7_is_medium(self):
+        llm = self._earnings_llm("2026-07-04", date(2026, 6, 27))
+        self.assertEqual(llm["AAPL"]["red_flags"][0]["severity"], "medium")
+
+    def test_earnings_same_day_is_medium(self):
+        llm = self._earnings_llm("2026-06-27", date(2026, 6, 27))
+        self.assertEqual(llm["AAPL"]["red_flags"][0]["severity"], "medium")
+
+    def test_earnings_day8_to_14_is_low_informational(self):
+        llm = self._earnings_llm("2026-07-05", date(2026, 6, 27))  # 8 天
+        self.assertEqual(llm["AAPL"]["red_flags"][0]["severity"], "low")
+        llm = self._earnings_llm("2026-07-11", date(2026, 6, 27))  # 14 天
+        self.assertEqual(llm["AAPL"]["red_flags"][0]["severity"], "low")
+
+    def test_earnings_beyond_window_is_dropped(self):
+        llm = self._earnings_llm("2026-07-12", date(2026, 6, 27))  # 15 天
+        self.assertEqual(llm, {})
+
+    def test_medium_earnings_flag_caps_verdict_via_llm_overlay(self):
+        # 端到端语义锁定：medium 财报红旗必须把封顶压到 74（是 不可能成立）
+        import scoring
+        llm = self._earnings_llm("2026-07-01", date(2026, 6, 27))
+        cap, reasons, _ = scoring._llm_overlay(llm["AAPL"])
+        self.assertEqual(cap, scoring.LLM_CAP_SOFT)
+        self.assertTrue(any("财报" in r for r in reasons))
 
     def test_merge_appends_sources_and_red_flags(self):
         primary = {"AAPL": {"sources": [{"id": "manual"}],

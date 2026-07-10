@@ -176,6 +176,71 @@ class TestConfirmationOverlay(unittest.TestCase):
         self.assertFalse(r["confirmation"]["ok"])
         self.assertEqual(r["verdict"], "观察")
 
+    def test_missing_volume_is_not_confirmation(self):
+        a = _strong()
+        a["volume"]["ratio_vs_ma20"] = None
+        r = S.score(a)
+        self.assertIsNone(r["confirmation"]["volume_pct"])
+        self.assertFalse(r["confirmation"]["ok"])
+        self.assertEqual(r["verdict"], "观察")
+
+
+class TestEntryTimingOverlay(unittest.TestCase):
+    @staticmethod
+    def _weaken_technical(a):
+        a["macd"] = {"bull": False, "above_zero": False,
+                     "recent_cross": {"type": "death"}}
+        a["rsi"] = {"RSI14": 40}
+        a["kdj"] = {"bull": False, "above_50": False}
+
+    @staticmethod
+    def _pullback(a):
+        a["entry_timing"] = {
+            "classification": "pullback_reversal",
+            "timing_score_pct": 90,
+            "pullback": {"recent_low_10d": 106.0},
+        }
+
+    def test_overextended_downgrades_without_changing_composite(self):
+        base = S.score(_strong())
+        a = _strong()
+        a["entry_timing"] = {
+            "classification": "overextended", "timing_score_pct": 20,
+            "ext_atr_above_ma20": 3.2, "rsi14": 81.0,
+        }
+        timed = S.score(a)
+        self.assertEqual(timed["composite"], base["composite"])
+        self.assertEqual(timed["verdict_before_entry_timing"], "是")
+        self.assertEqual(timed["verdict"], "观察")
+        self.assertEqual(timed["trade_plan"]["status"], "wait_pullback")
+
+    def test_pullback_can_replace_weak_technical_when_volume_is_valid(self):
+        a = _strong()
+        self._weaken_technical(a)
+        self._pullback(a)
+        r = S.score(a)
+        self.assertFalse(r["confirmation"]["ok"])
+        self.assertGreaterEqual(r["confirmation"]["volume_pct"], 40)
+        self.assertEqual(r["verdict_before_entry_timing"], "观察")
+        self.assertEqual(r["verdict"], "是")
+
+    def test_pullback_cannot_upgrade_when_volume_is_missing(self):
+        a = _strong()
+        self._weaken_technical(a)
+        self._pullback(a)
+        a["volume"]["ratio_vs_ma20"] = None
+        r = S.score(a)
+        self.assertIsNone(r["confirmation"]["volume_pct"])
+        self.assertEqual(r["verdict"], "观察")
+
+    def test_pullback_cannot_upgrade_when_volume_is_weak(self):
+        a = _strong()
+        self._weaken_technical(a)
+        self._pullback(a)
+        a["volume"]["obv"] = {"divergence": "bearish"}
+        r = S.score(a)
+        self.assertLess(r["confirmation"]["volume_pct"], 40)
+        self.assertEqual(r["verdict"], "观察")
 
 class TestPositionSizing(unittest.TestCase):
     def test_higher_vol_smaller_position(self):

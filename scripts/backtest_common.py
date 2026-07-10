@@ -22,20 +22,70 @@ from pipeline import build_result  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
-# 今日仍在交易的大盘流动性票
-ALIVE = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "AMD", "NFLX",
-    "ADBE", "CRM", "ORCL", "CSCO", "QCOM", "TXN", "INTC", "AMAT", "MU",
-    "JPM", "BAC", "WFC", "GS", "V", "MA",
-    "UNH", "JNJ", "LLY", "ABBV", "MRK", "PFE",
-    "WMT", "COST", "HD", "MCD", "NKE", "SBUX",
-    "XOM", "CVX", "CAT", "BA", "GE", "PG", "KO", "PEP", "DIS",
-]
+# 规则化篮子（2026-07-09 由 45 只手挑名单扩至 132 只）。选票规则（可复述，非手挑品味）：
+# 2021 年前上市、今日仍在交易的美股大盘流动性票，按 GICS 11 个行业分组、每行业 ≥7 只、
+# 行业内按大致市值/流动性取头部。目的：降低「今天著名的名字」的选择偏差、给行业中性
+# 检验提供标签。仍非时点成分库（缺 CRSP 类数据），幸存者缓解依赖 DELISTED/BANKRUPT。
+SECTOR = {
+    # Information Technology
+    "AAPL": "tech", "MSFT": "tech", "NVDA": "tech", "AVGO": "tech", "AMD": "tech",
+    "ADBE": "tech", "CRM": "tech", "ORCL": "tech", "CSCO": "tech", "QCOM": "tech",
+    "TXN": "tech", "INTC": "tech", "AMAT": "tech", "MU": "tech", "NOW": "tech",
+    "INTU": "tech", "IBM": "tech", "ACN": "tech", "LRCX": "tech", "KLAC": "tech",
+    # Communication Services
+    "GOOGL": "comm", "META": "comm", "NFLX": "comm", "DIS": "comm", "CMCSA": "comm",
+    "TMUS": "comm", "VZ": "comm", "T": "comm", "EA": "comm", "TTWO": "comm",
+    # Consumer Discretionary
+    "AMZN": "cons_disc", "TSLA": "cons_disc", "HD": "cons_disc", "MCD": "cons_disc",
+    "NKE": "cons_disc", "SBUX": "cons_disc", "LOW": "cons_disc", "TJX": "cons_disc",
+    "BKNG": "cons_disc", "MAR": "cons_disc", "GM": "cons_disc", "F": "cons_disc",
+    "ORLY": "cons_disc", "CMG": "cons_disc",
+    # Consumer Staples
+    "WMT": "cons_staples", "COST": "cons_staples", "PG": "cons_staples", "KO": "cons_staples",
+    "PEP": "cons_staples", "PM": "cons_staples", "MO": "cons_staples", "MDLZ": "cons_staples",
+    "CL": "cons_staples", "KMB": "cons_staples",
+    # Health Care
+    "UNH": "health", "JNJ": "health", "LLY": "health", "ABBV": "health", "MRK": "health",
+    "PFE": "health", "TMO": "health", "ABT": "health", "DHR": "health", "BMY": "health",
+    "AMGN": "health", "GILD": "health", "ISRG": "health", "VRTX": "health",
+    "REGN": "health", "CVS": "health",
+    # Financials（V/MA 按 2023 GICS 重分类归金融）
+    "JPM": "fin", "BAC": "fin", "WFC": "fin", "GS": "fin", "MS": "fin", "C": "fin",
+    "BLK": "fin", "SCHW": "fin", "AXP": "fin", "V": "fin", "MA": "fin", "SPGI": "fin",
+    "CME": "fin", "ICE": "fin", "COF": "fin", "PGR": "fin",
+    # Industrials
+    "CAT": "industrials", "BA": "industrials", "GE": "industrials", "HON": "industrials",
+    "UPS": "industrials", "RTX": "industrials", "LMT": "industrials", "DE": "industrials",
+    "UNP": "industrials", "CSX": "industrials", "FDX": "industrials", "ETN": "industrials",
+    "EMR": "industrials", "ITW": "industrials",
+    # Energy
+    "XOM": "energy", "CVX": "energy", "COP": "energy", "SLB": "energy", "EOG": "energy",
+    "MPC": "energy", "PSX": "energy", "VLO": "energy", "OXY": "energy", "KMI": "energy",
+    # Materials
+    "LIN": "materials", "APD": "materials", "SHW": "materials", "FCX": "materials",
+    "NEM": "materials", "ECL": "materials", "NUE": "materials", "DOW": "materials",
+    # Utilities
+    "NEE": "utilities", "DUK": "utilities", "SO": "utilities", "D": "utilities",
+    "AEP": "utilities", "EXC": "utilities", "SRE": "utilities",
+    # Real Estate
+    "PLD": "real_estate", "AMT": "real_estate", "EQIX": "real_estate", "CCI": "real_estate",
+    "SPG": "real_estate", "O": "real_estate", "PSA": "real_estate",
+}
+ALIVE = list(SECTOR)
 # 2021–24 间离开市场、但有死前历史的大盘票（降幸存者偏差）。
 # 真暴雷（跑高后归零，最关键）：SIVB(SVB,2023-03)、FRC(First Republic,2023-04)。
 # 被并购（溢价退出）：ATVI(MSFT)、TWTR(Musk)、PXD(XOM)、SPLK(Cisco)、VMW(Broadcom)、ABMD(JNJ)。
 # 排除 CREE（更名 WOLF，仅 87 根）与 SBNY（末根 2025-03 与其 2023 倒闭不符，数据存疑）。
 DELISTED = ["SIVB", "FRC", "ATVI", "TWTR", "PXD", "SPLK", "VMW", "ABMD"]
+# 终值口径分两类：破产票停牌后按 -100% 计（最后成交价远高于清零后的真实终值，
+# 用最后价会把 SIVB 的 -100% 记成 -60% 量级、低估模型崩盘前给高分的代价）；
+# 被并购票维持「最后可得收盘价」（溢价退出，最后价即真实终值）。
+BANKRUPT = {"SIVB", "FRC"}
+# 退市票的行业标签（供行业中性检验；ATVI/TWTR 按 GICS 归 Communication Services）
+SECTOR.update({
+    "SIVB": "fin", "FRC": "fin", "ATVI": "comm", "TWTR": "comm",
+    "PXD": "energy", "SPLK": "tech", "VMW": "tech", "ABMD": "health",
+})
 UNIVERSE = ALIVE + DELISTED
 BENCH = ["SPY", "QQQ"]
 WARMUP = 230         # 起评所需的最少历史根数（>200 让 MA200 可算）
@@ -83,6 +133,10 @@ class Panel:
         c0 = self.close(sym, entry_date)
         c1 = self.close(sym, target_date)
         if c1 is None:
+            dates = self.dates_by_symbol.get(sym, [])
+            if sym in BANKRUPT and dates and dates[-1] < target_date:
+                # 破产退市：股权清零，按 -100% 计（见 BANKRUPT 注释）
+                return -100.0 if c0 else None
             # Delisted/merged names often stop before the benchmark target date.
             # Use the last available post-entry close so the observation remains
             # in the panel instead of silently reintroducing survivorship bias.
@@ -149,18 +203,61 @@ def mean_t(values):
     return m, t, n
 
 
+def bootstrap_ci(values, n_boot=2000, seed=42, alpha=0.05):
+    """对均值做百分位 bootstrap，返回 (lo, hi) 置信区间；n<3 返回 None。
+
+    固定 seed 保证确定性（同输入同输出）。非重叠 IC 序列近独立，普通
+    bootstrap 足够；不做 block bootstrap。
+    """
+    import random
+    n = len(values)
+    if n < 3:
+        return None
+    rng = random.Random(seed)
+    means = sorted(
+        sum(values[rng.randrange(n)] for _ in range(n)) / n
+        for _ in range(n_boot)
+    )
+    lo_idx = int(alpha / 2 * n_boot)
+    hi_idx = int((1 - alpha / 2) * n_boot) - 1
+    return means[lo_idx], means[hi_idx]
+
+
+def sector_demean(triples):
+    """[(score, fwd, sector)] → [(score, fwd − 同期同行业均值)]。
+
+    用于行业中性 IC：把「买对行业」的收益成分去掉，只留行业内的个股区分度。
+    行业在当期只有 1 只票时剔除该票（无行业内对照，去均值后恒为 0 会稀释信号）。
+    """
+    by_sector = {}
+    for _, f, sec in triples:
+        by_sector.setdefault(sec, []).append(f)
+    means = {sec: sum(fs) / len(fs) for sec, fs in by_sector.items()}
+    counts = {sec: len(fs) for sec, fs in by_sector.items()}
+    return [(s, f - means[sec]) for s, f, sec in triples if counts[sec] > 1]
+
+
 def bucket_mean(pairs, lo, hi):
     """pairs:[(score,fwd)]，取 score∈[lo,hi) 的前瞻收益均值与个数。"""
     sel = [f for s, f in pairs if lo <= s < hi]
     return (sum(sel) / len(sel), len(sel)) if sel else (None, 0)
 
 
-def quintile_spread(pairs):
-    """最高五分位均值 − 最低五分位均值；返回 (spread, top, bot)，样本<10 返回 None。"""
+COST_BPS_ONEWAY = 10.0  # 大盘股保守单边成本（佣金+滑点），用于净价差口径
+
+
+def quintile_spread(pairs, cost_bps_oneway=COST_BPS_ONEWAY):
+    """最高五分位均值 − 最低五分位均值；返回 (spread_gross, spread_net, top, bot)。
+
+    净价差 = 毛价差 − 4×单边成本：多空两腿、每腿每期一买一卖共 4 次单边。
+    样本 <10 返回 None。
+    """
     if len(pairs) < 10:
         return None
     ss = sorted(pairs, key=lambda x: x[0])
     q = len(ss) // 5
     bot = sum(f for _, f in ss[:q]) / q
     top = sum(f for _, f in ss[-q:]) / q
-    return top - bot, top, bot
+    gross = top - bot
+    net = gross - 4 * cost_bps_oneway / 100.0
+    return gross, net, top, bot

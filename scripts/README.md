@@ -1,6 +1,6 @@
 # scripts/ 工程说明
 
-`worth-buy-stocks` skill 的脚本层。纯 Python 标准库 + 本机 `alpaca` CLI，无第三方依赖。Finnhub 为可选 HTTP 补充数据源。
+`worth-buy-stocks` skill 的脚本层。纯 Python 标准库 + 本机 `alpaca` CLI。Finnhub 为可选 HTTP 补充数据源；AI 意见 overlay 依赖可选的 `anthropic` SDK（`pip install anthropic`，未安装时自动降级）。
 确定性计算（同输入同输出）、不下单、不打印凭证。面向接手者，非用户文档（用户文档见 `../SKILL.md`）。
 
 ---
@@ -13,7 +13,7 @@
 
 2. **相对强度比绝对收益重要。** 一只股票涨了 20% 不说明任何问题——如果同期 SPY 涨了 25%，它是弱势股。我们的框架对标 SPY/QQQ，只选跑赢基准的标的。跑输大盘的股票，哪怕绝对收益为正，也不具备趋势领导力。
 
-3. **数据诚实比模型复杂重要。** 回测暴露了一个残酷事实：在 2023–26 的单边牛市中，经过逐因子 IC 分析，只有**风险调整动量（IC≈0.10）**和**相对强度（IC≈0.06）**在 3 个月前瞻维度稳定为正。MACD、RSI、KDJ、量价关系——这些经典指标的 IC 趋近于零。我们**如实记录这个结论**，并据此刻意限制了它们在评分中的角色。
+3. **数据诚实比模型复杂重要。** 回测暴露了一个残酷事实：在 2023–26 的单边牛市中，经过逐因子 IC 分析，只有**风险调整动量（IC≈0.10）**和**相对强度（IC≈0.06）**在 3 个月前瞻维度稳定为正。MACD、RSI、KDJ、量价关系——这些经典指标的 IC 趋近于零。我们**如实记录这个结论**，并据此刻意限制了它们在评分中的角色。2026-07-09 的扩篮子对照进一步暴露：这些正 IC **只在 45 只手挑大盘票池内可测得**，按规则扩到 132 只（11 行业）后全部衰减到统计无意义（95%CI 横跨 0，行业中性化亦然）——排名分是纪律工具，不是经过验证的选股 alpha（证据链见 `docs/model-card.md` 与 `scoring/__init__.py` 校准叙事）。
 
 4. **纪律工具，不是盈利预言机。** 本评分的统计显著性不足（t≈1.2），从未在熊市验证。它不是"买入就能赚钱"的保证，而是把一套可复现的交易纪律编码为确定性规则——让每个决策都有据可查、事后可复盘。
 
@@ -47,6 +47,7 @@
   fetching.py               Alpaca 日线拉取（分页/去重/feed 回退），无内部依赖
   local_env.py              本地 .env 解析（override → skill 根目录 → XDG 配置目录；凭证只读，不输出）
   finnhub.py                Finnhub quote/news/profile/earnings 可选补充上下文 + 保守新闻红旗提炼
+  ai_opinion.py ◄── agent_contracts, local_env   AI 第二意见 overlay（Claude API，只展示不评分，无 key/SDK 自动降级）
   portfolio.py              Alpaca 账户/持仓只读读取与归一化（account/positions）
 
 旁路工具（不在评分链路上）
@@ -55,9 +56,10 @@
 
 研究/回测（离线，不属于 skill 运行时）
   backtest_common.py ◄── fetching, analysis, metrics   篮子常量 + 取数面板 + 切片打分 + 统计原语
-  backtest_score.py        ◄── backtest_common   分数分桶 / 截面 IC
+  backtest_score.py        ◄── backtest_common   分数分桶 / 截面 IC / 确认层 A/B
   backtest_factor_ic.py    ◄── backtest_common   逐因子单因子 IC
-  backtest_robustness.py   ◄── backtest_common   非重叠窗口 + regime 拆分 + 幸存者探针
+  backtest_robustness.py   ◄── backtest_common   非重叠窗口 + regime/行业中性拆分 + bootstrap CI + 幸存者探针
+  forward_log.py           ◄── backtest_common, fetching, pipeline   前瞻验证日志（record/evaluate，见 docs/model-card.md）
 ```
 
 依赖方向单向向上，无环。`indicators.py` 仅做 CLI + 再导出（旧的 `import indicators as I` 仍可用）。
@@ -90,7 +92,7 @@
 Artifact 契约见 `../references/agent-contracts.md`。新增或修改 sub-agent 输出形状时，先更新该 reference，再补 `agent_contracts.py` 和测试。合并前可运行：
 
 ```bash
-# kind: news_context / account_context / finnhub_context / bars / snapshot_context / result
+# kind: news_context / account_context / finnhub_context / bars / snapshot_context / ai_opinion / result
 python3 scripts/validate_agent_contract.py --kind <kind> <artifact>.json
 ```
 
@@ -102,38 +104,30 @@ python3 scripts/validate_agent_contract.py --kind <kind> <artifact>.json
 
 `scoring.py` 是本项目的核心——一个确定性的多因子打分引擎，设计目标贴近真实量化基金的规则化决策流程。
 
-### 三层架构
+### 四层架构
 
 ```
                   输入: analyze_symbol 的分析字典
                               │
-         ┌────────────────────┼────────────────────┐
-         ▼                    ▼                     ▼
-   ALPHA 加权层           风险否决层              确认 overlay
-   (排名分来源)           (封顶/否决)             (不做加分)
-         │                    │                     │
-         ▼                    ▼                     ▼
-   momentum 55            MA200 下行 → 55        技术转弱时
-   rel_strength 35        MA60 跌破 → 65        "是"→"观察"
-   efficiency 10          周线空头 → 50
-         │                    │                     │
-         └────────────────────┼─────────────────────┘
-                              ▼
-                      composite (0–100)
-                      最终评分 + 结论
+   ALPHA 加权层 ──▶ 风险否决层 ──▶ 确认 overlay ──▶ 入场时机层
+   排名分来源         封顶/否决        技术量价确认       过热降级/拐点替代
+   momentum 55       MA200/MA60       只挡买入          不改 composite
+   rel_strength 35   周线/大盘
+   efficiency 10
 ```
 
 ### 因子分工的设计哲学
 
 这个架构来自血泪教训。早期版本把 trend、technical、volume 和 momentum、rel_strength 等权混入排名分——结果六因子 composite 的 IC (0.082) **低于** momentum 单因子 (0.102)。弱因子不是在"分散风险"，而是在**稀释信号**。
 
-修正方案——把因子按 IC 分到三个功能层——是本项目最重要的架构决策：
+修正方案——把因子按 IC 分工，并把入场质量独立成第四层——是本项目最重要的架构决策：
 
 | 层 | 包含因子 | IC 水平 | 角色 |
 |---|---------|--------|------|
 | ALPHA 加权 | momentum 55, rel_strength 35, efficiency 10 | 0.05–0.09 | 决定排名分，进 composite |
 | 风险否决 | trend (MA200/MA60/周线) | ~0.05 | 封顶分数，不进排名 |
 | 确认 overlay | technical, volume, trend_quality 混合 | ≈0 | 二元确认，只降不升 |
+| 入场时机 | 过热度、有序回调、完成日线反转信号 | 待 v1.1 前瞻验证 | 过热只降级；拐点在量能明确达标时可替代 technical/trend_quality |
 
 **efficiency 为什么进了排名层？** momentum 与 rel_strength 截面相关 ≈0.84，实为 ~1.2 个因子；而**裸 Kaufman 效率比**（趋势干净度）与 momentum 近正交（相关 ≈0.08）。在早期 24 期牛市样本里它 IC≈0.063、加进 composite 把 63 日 IC 从 0.064 抬到 0.069；在扩样本（57 期、含 2022 熊市、降幸存者偏差）里 IC 回落到 ≈0.027 但仍为正，故维持小权重 10。注意：效率比单拎出来有效，但混进 trend_quality（含 ADX/回归/回撤）反而被稀释到 IC≈0，故只取 `efficiency_30` 单原语入排名。
 
@@ -144,6 +138,16 @@ python3 scripts/validate_agent_contract.py --kind <kind> <artifact>.json
 **technical/volume 为什么只能做确认？** 因为 IC ≈ 0。在回测中，MACD 金叉/死叉、RSI 超买超卖、放量/缩量的 3 个月前瞻预测力与随机无异。但它们能提供**时机信息**——一只趋势强劲的股票如果出现短期技术转弱，可能不是卖出信号，但也不是最佳入场时机。所以我们用"确认 overlay"：技术健康时畅通无阻，技术转弱时把"是"降为"观察"。它不做加分，只做延迟入场。
 
 > 这层 gate **改判结论但其实战价值需持续验证**：`backtest_score.py` 现含 confirmation gate A/B——在「composite≥75 且无否决」的买入候选里按 `confirmation.ok` 拆分前瞻收益。若被封顶（`ok=False`）组收益并不更差，说明 gate 在砍真买点而非过滤差买点，应据此调整。买入候选稀少、样本小，需长窗口累积看方向。
+
+### 入场时机层（entry timing）
+
+纯动量+相对强度的排名分天然偏好"已经涨了很久"的标的——按它直接开仓就是系统性追高。`metrics.entry_timing()` 在 ALPHA/否决/确认三层之外加了第四层**时机层**，只作用于 verdict/action/交易计划，**不改 composite**（保持 IC 校准的排名分可回测可比）：
+
+- **过热降级（非对称，只降不升）**：价格较 MA20 超出 ≥3.0 倍 ATR、或 RSI14≥80、或两者软组合（≥2.2 倍且 RSI≥75）→ 分类 `overextended`，评分达标的「是」降级为「观察」，交易计划给回踩计划价（不是回避）。
+- **回调拐点替代确认**：趋势资格完好（价格在 MA60/MA200 上方附近）+ 30 日结构高点早于近 10 日低点 + 回撤 ≥4%（或近 5 日按同时点 MA20 确认触及）+ 最后一根已完成日线出现反转日（收阳且收在区间上半部/收复前一根高点）+ ≥2 个独立触发信号（放量 ≥1.2×、收复 MA10/20、KDJ 三日内金叉、MACD 柱上拐、RSI6 自弱位回升）→ 分类 `pullback_reversal`。此时 technical/trend_quality 确认由反转触发替代，但 volume 必须可计算且达标；缺失或偏弱均维持「观察」。
+- 分类为 `pullback_no_trigger`（回调中未确认）/`trend_broken`（趋势破坏）时不升级不降级，走原有分支。
+
+时机层的触发阈值（3.0/2.2 ATR、RSI 80/75、回撤 -4%、信号数 ≥2）为手调值，属于"已知校准缺口"清单的一部分；v1.1 forward log 记录时机分类与第四层介入前结论，按版本和分类做 A/B。注意：盘中运行时 `fetching.py` 会剔除今日未收盘的日线，当日盘中信息只进 snapshot 展示。
 
 ### 因子打分函数的设计
 
@@ -236,9 +240,18 @@ Finnhub 原始补充输出写入 `supplemental.finnhub`，不参与 `score.compo
 - `earnings`：用于提示近期财报事件风险。
 - `data_flags`：记录 rate limit、unauthorized、空数据等补充数据可信度问题。
 
-自动提炼规则只做降级候选，不做加分：明确负面关键词（如增发摊薄、退市/停牌、going concern、调查、诉讼、财报重述、重大运营风险）会生成 `medium/high` 红旗；7 天内财报只生成 `severity=low` 事件提醒；正面新闻、分析师观点和目标价被忽略。`indicators.py` 会把 Finnhub 生成的上下文和 `--llm-context-file` 合并，手工上下文的标量字段优先，来源与红旗追加。
+自动提炼规则只做降级候选，不做加分：明确负面关键词（如增发摊薄、退市/停牌、going concern、调查、诉讼、财报重述、重大运营风险）会生成 `medium/high` 红旗；临近财报是确定性事件风险——≤7 天生成 `severity=medium`（经 LLM overlay 封顶 74，`是` 降级为 `观察`；财报跳空是趋势前提最常见的确定性破坏源），8–14 天生成 `severity=low` 仅提醒；正面新闻、分析师观点和目标价被忽略。`indicators.py` 会把 Finnhub 生成的上下文和 `--llm-context-file` 合并，手工上下文的标量字段优先，来源与红旗追加。
 
 利好新闻、分析师观点、目标价和基本面不得加分；只有可验证红旗能通过 `llm_context` 触发现有降级/封顶。
+
+### AI 意见补充上下文
+
+`ai_opinion.py` 在评分完成后调用 Claude API（`claude-opus-4-8` + structured outputs），对每个非基准标的给出独立 stance（buy/watch/avoid）、一句话理由与主要风险，写入 `supplemental.ai_opinion`。设计文档：`../docs/ai-opinion-overlay-design.md`。
+
+- **零评分权力**：不改 `score.verdict`/`composite`，不封顶、不降级、不升级；权力级别低于新闻和账户 overlay。
+- **防锚定**：证据载荷按白名单（`EVIDENCE_KEYS`）从分析结果拷贝，verdict/composite/trade_plan 结构上进不去；`agree/diverge` 由脚本比较得出，不由模型自述。
+- **降级**：API key 从本地 `.env` 的 `ANTHROPIC_API_KEY` 读取（查找链与 Finnhub 相同）；无 key、未安装 `anthropic` SDK、API 失败/超时均返回 `status=unavailable`，评分照常。
+- **verdict=无法评分 的标的不触网**，直接标记不可用。
 
 ### 设计承诺
 
@@ -320,6 +333,7 @@ Spearman 秩相关不对收益的分布形态做假设。单只股票 3 个月�
 | `notify_telegram.py` | 把文本推到 Telegram，读环境变量，未配置则提示 | `python3 notify_telegram.py` |
 | `backtest_common.py` | 回测公共件：`UNIVERSE`/`Panel`/`spearman`/`quintile_spread` 等 | 库 |
 | `backtest_*.py` | 三类因子有效性回测 | `python3 backtest_xxx.py` |
+| `forward_log.py` | 前瞻验证日志：`record` 把当日评分固化到 `data/forward_log.jsonl`（同日重跑幂等、历史只追加），`evaluate` 对 ≥63 交易日的到期记录按 verdict 分桶对账（SPY 超额）。参数冻结见 `docs/model-card.md`，跨 `model_version` 不混算 | `python3 forward_log.py record` |
 
 ---
 
@@ -372,6 +386,10 @@ printf '%s' "结论文本" | python3 scripts/notify_telegram.py
 python3 scripts/backtest_score.py        # 分桶 + 截面 IC
 python3 scripts/backtest_factor_ic.py    # 逐因子 IC
 python3 scripts/backtest_robustness.py   # 非重叠 + regime + 幸存者探针
+
+# 样本外日志（v1.1 从信号日后下一交易日统一取股票/SPY 收盘）
+python3 scripts/forward_log.py record
+python3 scripts/forward_log.py evaluate  # 按 verdict 与 entry timing 分桶
 
 # 单元测试（纯计算 + 离线路径，不触网）
 python3 -m pytest tests/

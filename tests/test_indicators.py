@@ -373,5 +373,152 @@ class TestBuildResultInput(unittest.TestCase):
         )
 
 
+class TestAiOpinionIntegration(unittest.TestCase):
+    """AI 意见 overlay 的接入测试：只进 supplemental，绝不改 score。"""
+
+    def _result(self):
+        closes = [100.0 * (1.004 ** i) for i in range(260)]
+        flat = [400.0 * (1.0005 ** i) for i in range(260)]
+        bars = {"WIN": _bars(closes), "SPY": _bars(flat), "QQQ": _bars(flat)}
+        return I.build_result(["WIN", "SPY", "QQQ"], bars, "iex", "split")
+
+    def _artifact(self, sym="WIN"):
+        return {
+            "contract_version": "worth-buy-stocks.agent.v1",
+            "kind": "ai_opinion",
+            "status": "ok",
+            "symbols": {
+                sym: {
+                    "status": "ok",
+                    "stance": "buy",
+                    "confidence": "medium",
+                    "view": "趋势与相对强度领先",
+                    "key_risks": [],
+                    "agreement": "agree",
+                    "model": "claude-opus-4-8",
+                    "generated_at": "2026-07-08T00:00:00Z",
+                }
+            },
+        }
+
+    def _args(self, **overrides):
+        base = {"ai_opinion": "auto", "ai_opinion_context_file": None, "input": None}
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def test_load_ai_opinion_context_file(self):
+        f = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False)
+        json.dump(self._artifact(), f)
+        f.close()
+        try:
+            ctx = I._load_ai_opinion_context(f.name)
+        finally:
+            os.unlink(f.name)
+        self.assertEqual(ctx["status"], "ok")
+        self.assertEqual(ctx["symbols"]["WIN"]["stance"], "buy")
+
+    def test_invalid_ai_opinion_context_returns_unavailable(self):
+        bad = {"kind": "ai_opinion", "status": "ok", "symbols": {"WIN": {"status": "ok", "stance": "moon"}}}
+        f = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False)
+        json.dump(bad, f)
+        f.close()
+        try:
+            ctx = I._load_ai_opinion_context(f.name)
+        finally:
+            os.unlink(f.name)
+        self.assertEqual(ctx["status"], "unavailable")
+
+    def test_apply_attaches_supplemental_and_score_is_untouched(self):
+        res = self._result()
+        score_before = json.dumps(res["symbols"]["WIN"]["score"], sort_keys=True)
+        I._apply_ai_opinion(res, self._artifact())
+        self.assertEqual(res["supplemental"]["ai_opinion"]["status"], "ok")
+        self.assertEqual(
+            res["symbols"]["WIN"]["supplemental"]["ai_opinion"]["stance"], "buy"
+        )
+        self.assertNotIn("ai_opinion", res["symbols"]["WIN"]["score"])
+        self.assertEqual(
+            json.dumps(res["symbols"]["WIN"]["score"], sort_keys=True), score_before
+        )
+
+    def test_apply_recomputes_untrusted_offline_agreement(self):
+        res = self._result()
+        artifact = self._artifact()
+        artifact["symbols"]["WIN"]["stance"] = "avoid"
+        artifact["symbols"]["WIN"]["agreement"] = "agree"
+        I._apply_ai_opinion(res, artifact)
+        self.assertEqual(
+            res["symbols"]["WIN"]["supplemental"]["ai_opinion"]["agreement"],
+            "diverge",
+        )
+
+    def test_apply_none_leaves_result_byte_identical(self):
+        res, ref = self._result(), self._result()
+        I._apply_ai_opinion(res, None)
+        self.assertEqual(json.dumps(res, sort_keys=True), json.dumps(ref, sort_keys=True))
+
+    def test_apply_unavailable_writes_top_level_reason_only(self):
+        res = self._result()
+        I._apply_ai_opinion(res, {"status": "unavailable", "reason": "no key"})
+        self.assertEqual(res["supplemental"]["ai_opinion"]["status"], "unavailable")
+        self.assertNotIn("supplemental", res["symbols"]["WIN"])
+
+    def test_off_and_offline_default_do_not_generate(self):
+        res = self._result()
+        self.assertIsNone(I._ai_opinion_from_args(self._args(ai_opinion="off"), res, None))
+        self.assertIsNone(I._ai_opinion_from_args(self._args(input="bars.json"), res, None))
+
+    def test_auto_without_key_does_not_call_model(self):
+        res = self._result()
+        with patch.object(I, "ai_opinion_has_api_key", return_value=False), \
+             patch.object(I, "opinions_for_result") as gen:
+            self.assertIsNone(I._ai_opinion_from_args(self._args(), res, None))
+        gen.assert_not_called()
+
+    def test_auto_with_key_generates_and_threads_llm_context(self):
+        res = self._result()
+        llm_ctx = {"WIN": {"red_flags": []}}
+        with patch.object(I, "ai_opinion_sdk_available", return_value=True), \
+             patch.object(I, "ai_opinion_has_api_key", return_value=True), \
+             patch.object(I, "opinions_for_result", return_value=self._artifact()) as gen:
+            artifact = I._ai_opinion_from_args(self._args(), res, llm_ctx)
+        self.assertEqual(artifact["status"], "ok")
+        gen.assert_called_once_with(res, llm_context=llm_ctx)
+
+    def test_on_raises_when_generation_unavailable(self):
+        res = self._result()
+        with patch.object(I, "ai_opinion_sdk_available", return_value=True), \
+             patch.object(I, "ai_opinion_has_api_key", return_value=True), \
+             patch.object(I, "opinions_for_result",
+                          return_value={"status": "unavailable", "reason": "boom"}):
+            with self.assertRaises(RuntimeError):
+                I._ai_opinion_from_args(self._args(ai_opinion="on"), res, None)
+
+    def test_on_raises_when_symbol_generation_is_unavailable(self):
+        res = self._result()
+        artifact = self._artifact()
+        artifact["symbols"]["WIN"] = {
+            "status": "unavailable", "reason": "authentication failed"
+        }
+        with patch.object(I, "opinions_for_result", return_value=artifact):
+            with self.assertRaisesRegex(RuntimeError, "WIN: authentication failed"):
+                I._ai_opinion_from_args(self._args(ai_opinion="on"), res, None)
+
+    def test_context_file_wins_over_flag_and_needs_no_network(self):
+        res = self._result()
+        f = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False)
+        json.dump(self._artifact(), f)
+        f.close()
+        try:
+            with patch.object(I, "opinions_for_result") as gen:
+                artifact = I._ai_opinion_from_args(
+                    self._args(ai_opinion="off", ai_opinion_context_file=f.name), res, None
+                )
+        finally:
+            os.unlink(f.name)
+        gen.assert_not_called()
+        self.assertEqual(artifact["symbols"]["WIN"]["stance"], "buy")
+
+
 if __name__ == "__main__":
     unittest.main()

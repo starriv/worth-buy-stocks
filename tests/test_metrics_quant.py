@@ -78,6 +78,68 @@ class TestMomentum121(unittest.TestCase):
                          round((closes[-22] / closes[-253] - 1) * 100, 2))
 
 
+class TestEntryTiming(unittest.TestCase):
+    @staticmethod
+    def _ohlcv(closes, width=1.0, last_volume=2_000_000):
+        highs = [c + width for c in closes]
+        lows = [c - width for c in closes]
+        volumes = [1_000_000] * len(closes)
+        volumes[-1] = last_volume
+        return highs, lows, volumes
+
+    def test_insufficient_history_is_none(self):
+        closes = [100.0] * 59
+        highs, lows, volumes = self._ohlcv(closes)
+        self.assertIsNone(M.entry_timing(closes, highs, lows, volumes))
+
+    def test_overextended_monotonic_trend(self):
+        closes = [50.0 + 0.5 * i for i in range(80)]
+        highs, lows, volumes = self._ohlcv(closes)
+        timing = M.entry_timing(closes, highs, lows, volumes)
+        self.assertEqual(timing["classification"], "overextended")
+
+    def test_healthy_oscillating_uptrend_continues(self):
+        pattern = [0.0, 0.6, 1.2, 0.6, 0.0]
+        closes = [50.0 + 0.3 * i + pattern[i % 5] for i in range(300)]
+        highs, lows, volumes = self._ohlcv(closes)
+        timing = M.entry_timing(closes, highs, lows, volumes)
+        self.assertEqual(timing["classification"], "trend_continuation")
+
+    def test_ordered_peak_pullback_and_bounce_is_reversal(self):
+        closes = [80.0 + 0.2 * i for i in range(50)]
+        closes += [90, 93, 96, 94, 92, 90, 91, 92, 91, 94]
+        highs, lows, volumes = self._ohlcv(closes)
+        timing = M.entry_timing(closes, highs, lows, volumes)
+        self.assertEqual(timing["classification"], "pullback_reversal")
+        self.assertGreater(timing["pullback"]["days_since_30d_high"], 0)
+        self.assertGreaterEqual(timing["bounce"]["signal_count"], 2)
+
+    def test_ordered_pullback_without_bounce_waits(self):
+        closes = [80.0 + 0.2 * i for i in range(50)]
+        closes += [90, 93, 96, 94, 92, 90, 91, 92, 91, 91]
+        highs, lows, volumes = self._ohlcv(closes, last_volume=1_000_000)
+        timing = M.entry_timing(closes, highs, lows, volumes)
+        self.assertEqual(timing["classification"], "pullback_no_trigger")
+        self.assertFalse(timing["bounce"]["bounce_day"])
+
+    def test_new_high_after_old_low_is_not_a_pullback(self):
+        # 旧实现用今天的新高除以十日前低点，并用今天 MA20 回看历史，误判为 -4.12% 回调。
+        closes = [90.0 + 0.15 * i for i in range(50)]
+        closes += [97.15, 97.75, 98.15, 98.95, 99.55, 99.05, 100.05, 99.55, 99.35, 100.15]
+        highs, lows, volumes = self._ohlcv(closes, width=0.5)
+        highs[-1] = max(highs[-30:-1]) + 0.25  # 当天创 30 日新高
+        timing = M.entry_timing(closes, highs, lows, volumes)
+        self.assertNotEqual(timing["classification"], "pullback_reversal")
+        self.assertFalse(timing["pullback"]["touched_ma20_5d"])
+        self.assertGreater(timing["pullback"]["depth_from_30d_high_pct"], -4.0)
+
+    def test_broken_intermediate_trend(self):
+        closes = [100.0 + 0.1 * i for i in range(79)] + [80.0]
+        highs, lows, volumes = self._ohlcv(closes)
+        timing = M.entry_timing(closes, highs, lows, volumes)
+        self.assertEqual(timing["classification"], "trend_broken")
+
+
 class TestATR(unittest.TestCase):
     def test_constant_range(self):
         # 每根 H-L=2，且无跳空 -> ATR=2

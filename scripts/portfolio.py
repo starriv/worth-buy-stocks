@@ -10,6 +10,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 from utils import to_num as _num
+from fetching import _run_json
 
 
 def _round_num(value, ndigits=4):
@@ -20,20 +21,6 @@ def _round_num(value, ndigits=4):
 def _pct_from_factor(value):
     n = _num(value)
     return round(n * 100, 2) if n is not None else None
-
-
-def _run_json(cmd, timeout):
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    if res.returncode != 0:
-        detail = (res.stderr.strip() or res.stdout.strip() or "unknown error").replace("\n", " ")
-        raise RuntimeError(detail[:300])
-    text = res.stdout.strip()
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"无法解析 alpaca 输出为 JSON: {e}; 输出前 200 字符: {text[:200]!r}")
 
 
 def _normalize_account(account):

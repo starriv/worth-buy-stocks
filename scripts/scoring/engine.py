@@ -61,7 +61,8 @@ def score(
     effective_cap = min(cap, llm_cap)  # 价格否决层与 LLM overlay 取更严者；只压不抬
     composite = round(min(raw, effective_cap), 1) if raw is not None else None
     core_data_reasons = _core_data_reasons(alpha_subs)
-    blocking_reasons = gate_reasons + llm_reasons + core_data_reasons
+    # plan_blocking 决定交易计划分支；timing 降级原因只进输出（时机过热仍给回踩计划价）
+    plan_blocking = gate_reasons + llm_reasons + core_data_reasons
 
     # 确认 overlay（technical / volume / trend_quality，IC≈0：不加分，只在转弱时封顶买入）
     tech_s, vol_s = _f_technical(a), _f_volume_exec(a)
@@ -75,23 +76,54 @@ def score(
         "minimums_pct": {k: int(v * 100) for k, v in CONFIRMATION_MIN.items()},
     }
 
-    if composite is None:
-        verdict, action = "无法评分", "补充数据后重评"
-    elif core_data_reasons:
-        verdict, action = "无法评分", "补齐 SPY/QQQ 相对强度数据后重评"
-    elif composite >= 75 and not gate_reasons and confirmation_ok:
-        # gate_reasons redundant here: any gate caps to <=70, so composite>=75 implies
-        # no gates fired. Kept as defensive guard.
-        verdict, action = "是", "可关注 / 小仓位试探"
-    elif composite >= 75 and not gate_reasons:
-        verdict, action = "观察", "观察等待（技术未确认，买入封顶）"
-    elif composite >= 60:
-        verdict, action = "观察", "观察等待"
-    else:
-        verdict, action = "否", "回避"
+    # 入场时机层（analyze_symbol 计算）：过热只降级、拐点可替代趋势热度确认。
+    # 不改 composite（保持 IC 校准的排名分），只作用于 verdict/action/交易计划。
+    timing = a.get("entry_timing") or {}
+    timing_class = timing.get("classification")
+    timing_reasons: list[str] = []
+    # 拐点入场的替代确认：波动确认仍须达标（反弹要有参与度），趋势热度类确认
+    # （technical/trend_quality）在回调转折处定义性偏低，由反转触发信号替代。
+    # 数据诚实：量能缺失不是通过。拐点替代 technical/trend_quality，但 volume
+    # 必须明确可算且达标，否则维持观察。
+    vol_min_ok = vol_s is not None and vol_s >= CONFIRMATION_MIN["volume"]
+    pullback_entry_ok = timing_class == "pullback_reversal" and vol_min_ok
 
+    # 先计算原三层结论，再让第四层做单向过热降级或受约束的拐点替代。
+    # 显式保留 base_verdict，供 forward log 对第四层做 A/B，避免只看到最终结果。
+    if composite is None:
+        base_verdict, base_action = "无法评分", "补充数据后重评"
+    elif core_data_reasons:
+        base_verdict, base_action = "无法评分", "补齐 SPY/QQQ 相对强度数据后重评"
+    elif composite >= 75 and not gate_reasons and confirmation_ok:
+        base_verdict, base_action = "是", "可关注 / 小仓位试探"
+    elif composite >= 75 and not gate_reasons:
+        base_verdict, base_action = "观察", "观察等待（技术未确认，买入封顶）"
+    elif composite >= 60:
+        base_verdict, base_action = "观察", "观察等待"
+    else:
+        base_verdict, base_action = "否", "回避"
+
+    verdict, action = base_verdict, base_action
+    if base_verdict == "是" and timing_class == "overextended":
+        verdict, action = "观察", "观察等待（入场时机过热，等回踩计划价）"
+        ext = timing.get("ext_atr_above_ma20")
+        r14 = timing.get("rsi14")
+        timing_reasons.append(
+            "入场时机过热：价格较 MA20 超出约 %s 倍 ATR、RSI14 %s——追高风险大，"
+            "新开降级为观察，等回踩计划价或横盘消化后重评"
+            % (ext if ext is not None else "无法确认", r14 if r14 is not None else "无法确认")
+        )
+    elif base_verdict == "是" and timing_class == "pullback_reversal":
+        action = "回调拐点入场（分批，跌破反弹起点低点退出）"
+    elif (
+        base_verdict == "观察" and composite is not None and composite >= 75
+        and not gate_reasons and pullback_entry_ok
+    ):
+        verdict, action = "是", "回调拐点入场（分批，反转触发替代趋势热度确认）"
+
+    blocking_reasons = plan_blocking + timing_reasons
     suggested_position = _position_pct(a, composite)
-    trade_plan = _trade_plan(a, verdict, blocking_reasons, confirmation_ok)
+    trade_plan = _trade_plan(a, verdict, plan_blocking, confirmation_ok, timing_class)
     account_overlay, account_verdict, account_action = _account_overlay(
         a, verdict, suggested_position, trade_plan, account_context
     )
@@ -112,9 +144,14 @@ def score(
         "composite": composite,
         "raw_composite": raw,           # 未经否决封顶的原始分
         "verdict": verdict,
+        "verdict_before_entry_timing": base_verdict,
         "suggested_action": action,
         "factor_breakdown": breakdown,
         "confirmation": confirmation,   # technical/volume：确认 overlay，不进排名分
+        "entry_timing": ({              # 入场时机层回显：分类与时机分（详情在分析对象）
+            "classification": timing_class,
+            "timing_score_pct": timing.get("timing_score_pct"),
+        } if timing else None),
         "risk_gates": gate_reasons,
         "blocking_reasons": blocking_reasons,  # 面向输出：价格/趋势闸门 + 新闻面降级原因
         "cap_applied": effective_cap if effective_cap < 100 else None,

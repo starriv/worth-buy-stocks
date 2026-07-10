@@ -10,6 +10,7 @@
   metrics.py   纯指标原语（EMA/MACD/RSI/KDJ/均线/收益率/周线聚合）
   fetching.py  Alpaca CLI 日线拉取（分页/去重/feed 回退）
   finnhub.py   Finnhub quote/news/profile/earnings 补充上下文（可选）
+  ai_opinion.py AI 第二意见 overlay（可选；只展示不评分）
   portfolio.py Alpaca CLI 账户/持仓只读读取与归一化
   analysis.py  单 symbol 分析与跨 symbol 聚合（相对强度）
 本文件保留 CLI 与向后兼容的再导出（旧的 `import indicators as I` 仍可用）。
@@ -30,7 +31,10 @@
   # 可选：Finnhub 补充 quote/news/profile/earnings；无 key 时 auto 不触网
   indicators.py --symbols AAPL,SPY,QQQ --finnhub-context auto
 
-依赖：仅 Python 标准库 + 本机 `alpaca` CLI。
+  # 可选：AI 第二意见（只展示不评分）；无 ANTHROPIC_API_KEY 时 auto 不触网
+  indicators.py --symbols AAPL,SPY,QQQ --ai-opinion auto
+
+依赖：仅 Python 标准库 + 本机 `alpaca` CLI（AI 意见需可选的 `anthropic` SDK）。
 """
 import argparse
 import datetime
@@ -84,6 +88,7 @@ from portfolio import (  # noqa: F401
 from scoring import score  # noqa: F401
 from agent_contracts import (  # noqa: E402
     KIND_ACCOUNT,
+    KIND_AI_OPINION,
     KIND_BARS,
     KIND_FINNHUB,
     KIND_NEWS,
@@ -91,6 +96,13 @@ from agent_contracts import (  # noqa: E402
     KIND_SNAPSHOT,
     ContractError,
     validate_payload,
+)
+from ai_opinion import (  # noqa: E402
+    compute_agreement as ai_opinion_compute_agreement,
+    has_api_key as ai_opinion_has_api_key,
+    opinions_for_result,
+    sdk_available as ai_opinion_sdk_available,
+    unavailable_opinions,
 )
 
 BENCHMARK_SYMBOLS = ("SPY", "QQQ")
@@ -232,6 +244,73 @@ def _load_snapshot_context(path):
     return data
 
 
+def _load_ai_opinion_context(path):
+    """Load optional AI opinion overlay JSON for offline tests/replay."""
+    if not path:
+        return None
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if not _validate_or_drop(KIND_AI_OPINION, data, "--ai-opinion-context-file"):
+        return {"status": "unavailable", "reason": "ai_opinion 契约校验失败"}
+    return data
+
+
+def _ai_opinion_from_args(args, result, llm_context):
+    """Generate or load the display-only AI opinion artifact after scoring.
+
+    评分后置步骤：依赖指标与 verdict（算 agreement），不能并入前段并行采集。
+    auto 模式在无 key/SDK 时不触网也不写任何块；on 模式失败报错。
+    """
+    if args.ai_opinion_context_file:
+        return _load_ai_opinion_context(args.ai_opinion_context_file)
+    if args.ai_opinion == "off":
+        return None
+    if args.input and args.ai_opinion != "on":
+        return None
+    if args.ai_opinion == "auto" and not (ai_opinion_sdk_available() and ai_opinion_has_api_key()):
+        return None
+    targets = [
+        s for s in (result.get("symbols") or {})
+        if s not in BENCHMARK_SYMBOLS
+    ]
+    if len(targets) > 1:
+        sys.stderr.write(f"提示: AI 意见将逐票调用（{len(targets)} 票），预计每票数十秒\n")
+    artifact = opinions_for_result(result, llm_context=llm_context)
+    if args.ai_opinion == "on":
+        failures = unavailable_opinions(artifact, targets)
+        if failures:
+            detail = "；".join(f"{sym}: {reason}" for sym, reason in failures.items())
+            raise RuntimeError(f"AI 意见生成失败：{detail}")
+    return artifact
+
+
+def _apply_ai_opinion(result, artifact):
+    """Attach AI opinions to supplemental blocks only; ``score`` is never touched."""
+    if not isinstance(artifact, dict):
+        return
+    supplemental = result.setdefault("supplemental", {})
+    if artifact.get("status") != "ok":
+        supplemental["ai_opinion"] = {
+            "status": artifact.get("status") or "unavailable",
+            "reason": artifact.get("reason"),
+        }
+        return
+    entries = artifact.get("symbols") or {}
+    supplemental["ai_opinion"] = {"status": "ok", "symbols_count": len(entries)}
+    for sym, entry in entries.items():
+        a = (result.get("symbols") or {}).get(sym)
+        if isinstance(a, dict) and "error" not in a:
+            # 离线 artifact 里的 agreement 不可信：它必须与当前脚本 verdict 比较后
+            # 重新生成，避免旧结果或手改文件伪造“同意/分歧”。
+            normalized_entry = dict(entry) if isinstance(entry, dict) else entry
+            if isinstance(normalized_entry, dict) and normalized_entry.get("status") == "ok":
+                verdict = (a.get("score") or {}).get("verdict")
+                normalized_entry["agreement"] = ai_opinion_compute_agreement(
+                    verdict, str(normalized_entry.get("stance") or "")
+                )
+            a.setdefault("supplemental", {})["ai_opinion"] = normalized_entry
+
+
 def _snapshot_context_from_args(args, symbols):
     if args.snapshot_context_file:
         return _load_snapshot_context(args.snapshot_context_file)
@@ -284,6 +363,13 @@ def main():
         help="当日快照补充上下文：auto=非离线模式拉取当日最新价/报价/成交，on=失败时报错，off=关闭。只写入 supplemental，不参与 score",
     )
     p.add_argument("--snapshot-context-file", help="离线快照补充上下文 JSON")
+    p.add_argument(
+        "--ai-opinion",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="AI 第二意见 overlay：auto=有 ANTHROPIC_API_KEY 时调用，on=失败时报错，off=关闭。只写入 supplemental，不参与 score",
+    )
+    p.add_argument("--ai-opinion-context-file", help="离线 AI 意见 overlay JSON")
     args = p.parse_args()
     llm_context = _load_llm_context(args.llm_context_file)
 
@@ -311,9 +397,9 @@ def main():
     else:
         if not args.symbols:
             p.error("非离线模式需要 --symbols")
-        end = args.end or datetime.date.today().isoformat()
+        end = args.end or datetime.datetime.now(datetime.timezone.utc).date().isoformat()
         # 约两年日线：MA60 与周线 MACD(需 ~78 周) 都能充分预热
-        start = args.start or (datetime.date.today() - datetime.timedelta(days=728)).isoformat()
+        start = args.start or (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=728)).isoformat()
         symbols = _symbols_with_benchmarks(
             [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
         )
@@ -340,6 +426,9 @@ def main():
             llm_context=effective_llm_context, account_context=account_context,
             finnhub_context=finnhub_context, snapshot_context=snapshot_context,
         )
+
+    # AI 意见是评分完成后的展示 overlay：任何失败只降级自身，绝不改 score。
+    _apply_ai_opinion(result, _ai_opinion_from_args(args, result, effective_llm_context))
 
     try:
         validate_payload(KIND_RESULT, result)

@@ -369,6 +369,202 @@ def up_day_volume_ratio(closes, volumes, window=10):
     return round(avg_up / avg_dn, 2) if avg_dn else None
 
 
+# ---- 入场时机（过热度 / 趋势内回调拐点）----
+
+# 过热判定：距 MA20 的 ATR 倍数与 RSI14 超买（硬条件二选一，软条件需同时满足）
+ENTRY_EXT_ATR_HARD = 3.0
+ENTRY_EXT_RSI_HARD = 80.0
+ENTRY_EXT_ATR_SOFT = 2.2
+ENTRY_EXT_RSI_SOFT = 75.0
+# 回调拐点：近 10 日低点较 30 日高点的最小回撤深度（%），或 5 日内触及 MA20
+ENTRY_PULLBACK_MIN_DEPTH_PCT = -4.0
+# 反弹确认：反转日之外还需的独立触发信号数
+ENTRY_BOUNCE_MIN_SIGNALS = 2
+
+
+def _ma_reclaim(closes, n, lookback=2):
+    """近 lookback 根内收盘价由 n 日均线下方收复到上方，且当前仍在上方。"""
+    total = len(closes)
+    if total < n + lookback + 1:
+        return None
+    m_now = ma(closes, n)
+    if m_now is None or closes[-1] <= m_now:
+        return False
+    for back in range(lookback):
+        c_prev = closes[-2 - back]
+        m_prev = ma(closes[:total - 1 - back], n)
+        if m_prev is not None and c_prev <= m_prev:
+            return True
+    return False
+
+
+def entry_timing(closes, highs, lows, volumes):
+    """入场时机画像：过热度 + 趋势内回调拐点识别。历史 <60 根返回 None。
+
+    只做时机分类，不判断趋势资格（趋势/相对强度由 ALPHA 因子与闸门负责）：
+      - overextended：价格显著超出短期均值/RSI 超买 → 追高风险
+      - pullback_reversal：趋势完好 + 近期回调 + 最后一根出现放量反转触发
+      - pullback_no_trigger：回调中但反转未确认
+      - trend_continuation：趋势正常推进、未过热
+      - trend_broken：跌破中期均线（资格由闸门另行否决）
+    """
+    n = len(closes)
+    if n < 60:
+        return None
+    last = closes[-1]
+    ma20 = ma(closes, 20)
+    ma60 = ma(closes, 60)
+    ma200 = ma(closes, 200)
+    atr14 = atr(highs, lows, closes, 14)
+    rsi14 = rsi(closes, 14)
+
+    # 过热度：距 MA20 的 ATR 倍数（均值回归引力的量纲化读数）
+    ext_atr = round((last - ma20) / atr14, 2) if (ma20 and atr14) else None
+    ext_pct = round((last / ma20 - 1) * 100, 2) if ma20 else None
+    overextended = bool(
+        (ext_atr is not None and ext_atr >= ENTRY_EXT_ATR_HARD)
+        or (rsi14 is not None and rsi14 >= ENTRY_EXT_RSI_HARD)
+        or (ext_atr is not None and rsi14 is not None
+            and ext_atr >= ENTRY_EXT_ATR_SOFT and rsi14 >= ENTRY_EXT_RSI_SOFT)
+    )
+
+    # 回调结构必须满足「先高点、后低点、再到当前反转」的时间顺序。旧实现直接拿
+    # 近 10 日低点除以近 30 日最高点；当最高点就是今天时，会把从旧低点上涨到
+    # 新高的幅度误当成回撤。这里先定位近 10 日最低点，再只在它之前找高点。
+    win = min(30, n)
+    window_start = n - win
+    recent_start = n - min(10, n)
+    recent_low = min(lows[recent_start:])
+    # 并列低点取最后一个，优先解释离当前反转最近的回调低点。
+    recent_low_idx = recent_start + max(
+        i for i, value in enumerate(lows[recent_start:]) if value == recent_low
+    )
+    prior_highs = highs[window_start:recent_low_idx]
+    if prior_highs:
+        hi = max(prior_highs)
+        # 并列高点取最后一个，得到距离当前最近且仍早于低点的结构高点。
+        hi_idx = window_start + max(i for i, v in enumerate(prior_highs) if v == hi)
+        days_since_high = n - 1 - hi_idx
+        depth = round((recent_low / hi - 1) * 100, 2) if hi else None
+    else:
+        hi, hi_idx, days_since_high, depth = None, None, None, None
+
+    # 过去五日的低点必须与「当时」的 MA20 比较，不能用今天的 MA20 回看历史。
+    touched_ma20_days = []
+    for idx in range(max(19, n - 5), n):
+        ma20_at_idx = ma(closes[:idx + 1], 20)
+        if ma20_at_idx is not None and lows[idx] <= ma20_at_idx * 1.01:
+            touched_ma20_days.append(idx)
+    touched_ma20 = bool(touched_ma20_days)
+    had_pullback = bool(
+        (depth is not None and depth <= ENTRY_PULLBACK_MIN_DEPTH_PCT) or touched_ma20
+    )
+
+    # 反转日：收阳且收在日内区间上半部，或直接收在前一根最高价上方
+    prev_close = closes[-2]
+    up_day = last > prev_close
+    day_range = highs[-1] - lows[-1]
+    close_strength = round((last - lows[-1]) / day_range, 2) if day_range else None
+    bounce_day = bool(up_day and (
+        (close_strength is not None and close_strength >= 0.55) or last > highs[-2]
+    ))
+
+    # 独立触发信号
+    vol_ma20 = ma(volumes, 20)
+    vol_ratio = round(volumes[-1] / vol_ma20, 2) if vol_ma20 else None
+    vol_expand = bool(vol_ratio is not None and vol_ratio >= 1.2)
+    reclaim10 = _ma_reclaim(closes, 10)
+    reclaim20 = _ma_reclaim(closes, 20)
+    reclaim_ma = bool(reclaim10 or reclaim20)
+
+    kdj_now = kdj(highs, lows, closes)
+    kdj_p1 = kdj(highs[:-1], lows[:-1], closes[:-1])
+    kdj_p2 = kdj(highs[:-2], lows[:-2], closes[:-2]) if n > 2 else None
+    kdj_golden = bool(
+        kdj_now and kdj_now.get("bull") and (
+            (kdj_p1 and not kdj_p1.get("bull"))
+            or (kdj_p1 and kdj_p1.get("bull") and kdj_p2 and not kdj_p2.get("bull"))
+        )
+    )
+
+    macd_now = macd(closes)
+    macd_p1 = macd(closes[:-1])
+    macd_rising = bool(
+        macd_now and macd_p1
+        and macd_now.get("hist") is not None and macd_p1.get("hist") is not None
+        and macd_now["hist"] > macd_p1["hist"]
+    )
+
+    rsi6_now = rsi(closes, 6)
+    rsi6_p1 = rsi(closes[:-1], 6)
+    rsi6_rebound = bool(
+        rsi6_now is not None and rsi6_p1 is not None
+        and rsi6_now > rsi6_p1 and rsi6_p1 < 50
+    )
+
+    signal_count = sum((vol_expand, reclaim_ma, kdj_golden, macd_rising, rsi6_rebound))
+
+    # 趋势是否完好（时机分类的前提；不足以单独构成买入资格）
+    trend_intact = bool(
+        ma60 is not None and last >= ma60 * 0.97
+        and (ma200 is None or last > ma200 * 0.99)
+    )
+
+    if not trend_intact:
+        cls = "trend_broken"
+        timing_score = 10
+    elif overextended:
+        cls = "overextended"
+        timing_score = 20
+    elif had_pullback and bounce_day and signal_count >= ENTRY_BOUNCE_MIN_SIGNALS:
+        cls = "pullback_reversal"
+        timing_score = min(75 + 5 * signal_count, 95)
+    elif had_pullback and (ext_atr is None or ext_atr < 1.0):
+        # 回调中但反转未确认（含反弹日信号不足）；已收复到 MA20 上方 1 ATR 以上的
+        # 视为回调结束、回到趋势推进
+        cls = "pullback_no_trigger"
+        timing_score = 45
+    else:
+        cls = "trend_continuation"
+        timing_score = 65
+        if ext_atr is not None and ext_atr >= 2.0:
+            timing_score = 45
+        elif ext_atr is not None and ext_atr >= 1.5:
+            timing_score = 55
+
+    return {
+        "ext_atr_above_ma20": ext_atr,
+        "ext_pct_above_ma20": ext_pct,
+        "rsi14": rsi14,
+        "overextended": overextended,
+        "trend_intact": trend_intact,
+        "pullback": {
+            "high_30d": round(hi, 4) if hi is not None else None,
+            "days_since_30d_high": days_since_high,
+            "recent_low_10d": round(recent_low, 4),
+            "bars_since_recent_low": n - 1 - recent_low_idx,
+            "depth_from_30d_high_pct": depth,
+            "touched_ma20_5d": touched_ma20,
+            "had_pullback": had_pullback,
+        },
+        "bounce": {
+            "bounce_day": bounce_day,
+            "up_day": up_day,
+            "close_strength": close_strength,
+            "vol_ratio_vs_ma20": vol_ratio,
+            "vol_expand": vol_expand,
+            "reclaim_ma10": reclaim10,
+            "reclaim_ma20": reclaim20,
+            "kdj_golden_3d": kdj_golden,
+            "macd_hist_rising": macd_rising,
+            "rsi6_rebound": rsi6_rebound,
+            "signal_count": signal_count,
+        },
+        "classification": cls,
+        "timing_score_pct": timing_score,
+    }
+
+
 def adx(highs, lows, closes, n=14):
     """Average Directional Index（Wilder 平滑）。
 

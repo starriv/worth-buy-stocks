@@ -50,6 +50,7 @@ def _trade_plan(
     verdict: str,
     blocking_reasons: list[str],
     confirmation_ok: bool,
+    timing_class: str | None = None,
 ) -> dict[str, Any]:
     """Deterministic entry/exit plan from ATR + MA60 + 30-day structure.
 
@@ -73,6 +74,11 @@ def _trade_plan(
     stop_candidates = [last - 2 * unit]
     if ma60 and 0 < ma60 < last:
         stop_candidates.append(ma60 * 0.98)
+    # 回调拐点入场：反弹起点低点是更贴近的结构性止损位
+    if timing_class == "pullback_reversal":
+        recent_low = _num(((a.get("entry_timing") or {}).get("pullback") or {}).get("recent_low_10d"))
+        if recent_low and 0 < recent_low < last:
+            stop_candidates.append(recent_low * 0.99)
     stop_candidates = [s for s in stop_candidates if s and 0 < s < last]
     stop_loss = max(stop_candidates) if stop_candidates else last * 0.92
     # Ensure stop has >=3% buffer below last close to absorb daily noise.
@@ -92,7 +98,14 @@ def _trade_plan(
     if verdict == "是":
         status = "entry_allowed"
         entry = last
-        note = "趋势与确认通过，可按当前价附近分批；超过追价上限则等待回踩或突破确认"
+        if timing_class == "pullback_reversal":
+            note = "回调拐点确认：按当前价附近分批，跌破反弹起点低点或止损价即退出，不追离场后的反抽"
+        else:
+            note = "趋势与确认通过，可按当前价附近分批；超过追价上限则等待回踩或突破确认"
+    elif verdict == "观察" and not blocking_reasons and timing_class == "overextended":
+        status = "wait_pullback"
+        entry = pullback_entry
+        note = "评分达标但入场时机过热：不追当前价，只在回踩计划价附近或横盘消化后接回"
     elif verdict == "观察" and not blocking_reasons and confirmation_ok is False:
         status = "wait_confirmation"
         entry = pullback_entry

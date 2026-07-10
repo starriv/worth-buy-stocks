@@ -117,9 +117,10 @@ def _core_data_reasons(alpha_subs: dict[str, float | None]) -> list[str]:
 
 
 def _confirmation_ok(tech_s: float | None, vol_s: float | None, tq_s: float | None) -> bool:
+    """All confirmation dimensions must be available and meet their minimums."""
     checks = (
         (tech_s, CONFIRMATION_MIN["technical"]),
         (vol_s, CONFIRMATION_MIN["volume"]),
         (tq_s, CONFIRMATION_MIN["trend_quality"]),
     )
-    return all(value is None or value >= threshold for value, threshold in checks)
+    return all(value is not None and value >= threshold for value, threshold in checks)

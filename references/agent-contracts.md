@@ -222,6 +222,51 @@ Rules:
 - Snapshot writes to `result.supplemental.snapshots` (summary) and each `symbol.supplemental.snapshot` (detail).
 - `status=unavailable` is a valid non-blocking state; scoring continues without it.
 
+## Artifact: ai_opinion
+
+Purpose: optional display-only AI second opinion. Produced internally by `scripts/ai_opinion.py` (invoked from `indicators.py`/`scanner.py`); an offline artifact is only needed for replay/tests via `--ai-opinion-context-file`. It is never produced by a sub-agent and never feeds `score` — it writes to each symbol's `supplemental.ai_opinion` only.
+
+```json
+{
+  "contract_version": "worth-buy-stocks.agent.v1",
+  "kind": "ai_opinion",
+  "status": "ok",
+  "symbols": {
+    "AAPL": {
+      "status": "ok",
+      "stance": "buy",
+      "confidence": "medium",
+      "view": "趋势与相对强度均领先,量价确认充分",
+      "key_risks": ["财报临近"],
+      "agreement": "agree",
+      "model": "claude-opus-4-8",
+      "generated_at": "2026-07-08T00:00:00Z"
+    }
+  }
+}
+```
+
+Rules:
+
+- `stance` must be `buy`, `watch`, or `avoid`; `confidence` must be `low`, `medium`, or `high`; `agreement` must be `agree`, `diverge`, or `not_applicable`.
+- A `status=ok` symbol entry requires `stance`, `confidence`, `view`, and `agreement`; a non-ok entry only requires `reason`.
+- `agreement` is computed by the script (stance vs current `score.verdict` mapping), never self-reported by the model. Offline replay files are re-evaluated when attached; their stored `agreement` value is not trusted.
+- The AI opinion has zero scoring power: it must never change `score.verdict`/`score.composite`, never cap, never downgrade, never upgrade.
+- The evidence payload sent to the model must not contain `verdict`, `composite`, or `trade_plan` (anti-anchoring).
+- `status=unavailable` (e.g. no `ANTHROPIC_API_KEY`, API timeout) is a valid non-blocking state; scoring continues without it.
+- In explicit `--ai-opinion on` mode, every requested symbol must have `status=ok`; any missing/unavailable entry makes the command fail clearly. `auto` mode keeps per-symbol graceful degradation.
+
+Unavailable shape:
+
+```json
+{
+  "contract_version": "worth-buy-stocks.agent.v1",
+  "kind": "ai_opinion",
+  "status": "unavailable",
+  "reason": "ANTHROPIC_API_KEY not configured"
+}
+```
+
 ## Artifact: bars
 
 Purpose: provide reproducible offline market data for `--input`.
@@ -278,6 +323,7 @@ Required shape:
 Rules:
 
 - Main agent must not rewrite `score.verdict` or `score.composite`.
+- `score.account_overlay` and `score.llm_overlay` are `null` when the corresponding overlay is disabled or offline; `null` is a valid state, not a contract violation.
 - If `score` is missing for the target, return `无法评分`.
 - Final prose may summarize, but must preserve `blocking_reasons`, account overlay availability, and news overlay availability.
 
@@ -291,6 +337,7 @@ python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind account_context a
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind finnhub_context finnhub_context.json
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind bars bars.json
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind snapshot_context snapshot_context.json
+python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind ai_opinion ai_opinion.json
 python3 "$SKILL_DIR/scripts/validate_agent_contract.py" --kind result result.json
 ```
 
