@@ -21,7 +21,7 @@ Use this reference when the stock workflow is split across sub-agents. The main 
    - News/event-risk agent -> `news_context.json`.
    - Account overlay agent -> `account_context.json`.
    - Finnhub context agent -> `finnhub_context.json`.
-   - Chart agent -> chart text/image only when requested.
+   - Chart agent -> default candlestick view via `chart.py --plan result.json` (entry/stop/take-profit level lines), shown above the `结论` section; runs after scoring output exists. Skip silently on failure or when the user opts out.
    - QA agent -> final response review only after script output exists.
 3. Main agent validates each JSON artifact with `scripts/validate_agent_contract.py`.
 4. Main agent runs `scripts/indicators.py`, passing validated artifact files:

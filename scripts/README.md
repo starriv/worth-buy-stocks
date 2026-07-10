@@ -39,7 +39,7 @@
 ```
 运行时（skill 评分链路）
   metrics.py ───────────────┐  纯指标原语，无内部依赖
-  scoring.py ──────────────┐│  确定性因子打分引擎，纯读分析字典、无内部依赖
+  scoring/ ────────────────┐│  确定性因子打分引擎（包：engine/factors/gates/trade_plan/account_overlay），纯读分析字典、无内部依赖
                             ││
   analysis.py ◄── metrics, scoring, portfolio   单股分析 + 跨股聚合(相对强度) + 附 score 块
                             ▲
@@ -51,7 +51,7 @@
   portfolio.py              Alpaca 账户/持仓只读读取与归一化（account/positions）
 
 旁路工具（不在评分链路上）
-  chart.py ◄── fetching(惰性)         终端 K 线
+  chart.py ◄── fetching(惰性)         终端 K 线 + 彩色 HTML 图
   notify_telegram.py                  Telegram 推送（读环境变量）
 
 研究/回测（离线，不属于 skill 运行时）
@@ -66,7 +66,7 @@
 
 ### 设计原则
 
-**纯函数优先。** 每个模块对相同输入产生相同输出。`metrics.py` 不触网、不读文件；`scoring.py` 纯读分析字典。只有 `fetching.py`、`finnhub.py`、`portfolio.py`、`local_env.py` 和 CLI 入口涉及外部状态。这让单元测试可以离线运行、不需要 mock 外部 API。
+**纯函数优先。** 每个模块对相同输入产生相同输出。`metrics.py` 不触网、不读文件；`scoring/` 包纯读分析字典。只有 `fetching.py`、`finnhub.py`、`portfolio.py`、`local_env.py` 和 CLI 入口涉及外部状态。这让单元测试可以离线运行、不需要 mock 外部 API。
 
 **模块自描述。** 每个 `.py` 的 docstring 说明自己的职责、输入输出、依赖。接手者不需要通读整个工程就能定位修改点。
 
@@ -84,7 +84,7 @@
 | `portfolio.py` | 只读 account/positions，归一化敞口 | `account_context` artifact |
 | `finnhub.py` | 读取 quote/news/profile/earnings，生成补充上下文 | `finnhub_context` artifact |
 | 新闻检索 agent | 检索 IR/SEC/交易所/主流财经源，提炼风险 | `news_context` artifact |
-| `chart.py` | 按需生成 K 线辅助视图 | 图表输出 |
+| `chart.py` | 生成默认展示的 K 线视图（`--plan` 叠加计划价位线，置于结论上方） | 图表输出 |
 | QA agent | 检查最终回复是否遵守 skill 约束 | 复核意见 |
 
 禁止的 sub-agent 边界：拆分 `scoring.score()` 内部计算、让多个 agent 给出竞争评分、让新闻/利好加分、执行任何订单动作。
@@ -102,7 +102,7 @@ python3 scripts/validate_agent_contract.py --kind <kind> <artifact>.json
 
 ## 打分引擎原理
 
-`scoring.py` 是本项目的核心——一个确定性的多因子打分引擎，设计目标贴近真实量化基金的规则化决策流程。
+`scoring/` 包是本项目的核心——一个确定性的多因子打分引擎（`engine.py` 主流程、`factors.py` 因子、`gates.py` 风险闸门、`trade_plan.py` 计划价、`account_overlay.py` 敞口），设计目标贴近真实量化基金的规则化决策流程。
 
 ### 四层架构
 
@@ -255,7 +255,7 @@ Finnhub 原始补充输出写入 `supplemental.finnhub`，不参与 `score.compo
 
 ### 设计承诺
 
-- 改打分逻辑：只动 `scoring.py` 的 `ALPHA_WEIGHTS` / 各 `_f_*` 断点 / `_gates()` 封顶规则。`score()` 与三个回测脚本自动跟随。
+- 改打分逻辑：只动 `scoring/constants.py` 的 `ALPHA_WEIGHTS`、`scoring/factors.py` 各 `_f_*` 断点、`scoring/gates.py` 封顶规则。`score()` 与三个回测脚本自动跟随。
 - 不改引擎结构的情况下新增因子：写新的 `_f_xxx()` 函数，加入 `ALPHA_FACTORS` 或 `CONFIRMATION_FACTORS` 字典。
 - 所有评分参数有回测出处：问"为什么 momentum 是 60 不是 50"，答案在 `backtest_factor_ic.py` 的逐因子 IC 表格里。
 
@@ -326,10 +326,10 @@ Spearman 秩相关不对收益的分布形态做假设。单只股票 3 个月�
 | `portfolio.py` | `alpaca account get` / `position list` 只读读取账户敞口和持仓（两次 CLI 调用并行），过滤账号标识 | 库 |
 | `analysis.py` | `analyze_symbol`（单票全字段）+ `relative_strength`（跨票相对强度） | 库 |
 | `pipeline.py` | `build_result`（跨票聚合相对强度、附 `score`、合并 overlay） | 库 |
-| `scoring.py` | `score(analysis)` 确定性多因子打分：alpha 加权 + 风险否决 + 确认 overlay + 新闻面 overlay + 反波动率仓位 + 入场/出场计划 + 账户敞口建议 | 库 |
+| `scoring/` | `score(analysis)` 确定性多因子打分（包）：alpha 加权 + 风险否决 + 确认 overlay + 新闻面 overlay + 反波动率仓位 + 入场/出场计划 + 账户敞口建议 | 库 |
 | `indicators.py` | CLI：拉数→分析→打分→输出 JSON。四段网络采集（bars/account/finnhub/snapshot）内部并行，Finnhub 再按 symbol 并行；可用 `--llm-context-file` 传入新闻面风控 JSON，默认 `--account-context auto`/`--finnhub-context auto`/`--snapshot auto` | `python3 indicators.py` |
 | `scanner.py` | 全市场扫描 CLI：取股池→流动性初筛→精简批量评分→提取 `是` 候选→新闻复核降级。内部复用 `build_result` 做两轮评分，输出 `candidates`/`downgraded`/`market_regime`/`counts` | `python3 scanner.py` |
-| `chart.py` | 终端蜡烛图（默认自取数据，或 `--input -` 喂 JSON） | `python3 chart.py` |
+| `chart.py` | 终端蜡烛图（默认自取数据，或 `--input -` 喂 JSON）；`--plan` 喂评分结果 JSON 可叠加入场/止盈/止损价位线，`--entry/--stop-loss/--take-profit[-2]` 手动覆盖；终端色默认开（`--no-color`/`NO_COLOR` 关）；`--html [路径] [--open]` 另出自包含彩色 HTML 图（SVG，含悬浮 OHLC 与数据表） | `python3 chart.py` |
 | `notify_telegram.py` | 把文本推到 Telegram，读环境变量，未配置则提示 | `python3 notify_telegram.py` |
 | `backtest_common.py` | 回测公共件：`UNIVERSE`/`Panel`/`spearman`/`quintile_spread` 等 | 库 |
 | `backtest_*.py` | 三类因子有效性回测 | `python3 backtest_xxx.py` |
@@ -372,6 +372,14 @@ python3 scripts/indicators.py --input bars.json --symbols AAPL,SPY,QQQ --snapsho
 # 终端 K 线（自取，最常用）
 python3 scripts/chart.py --symbol AAPL --count 30
 
+# 终端 K 线 + 计划价位线（入场/止盈/止损叠加为水平虚线，价格轴自动扩展）
+python3 scripts/indicators.py --symbols AAPL,SPY,QQQ > result.json
+python3 scripts/chart.py --symbol AAPL --count 30 --plan result.json
+# 或手动指定价位（覆盖 --plan 同名价位）
+python3 scripts/chart.py --symbol AAPL --entry 250 --stop-loss 238 --take-profit 274
+# 彩色 HTML 图（ANSI 经 agent 转写会丢色，HTML 里颜色是内容不会丢）；加 --open 可自动打开
+python3 scripts/chart.py --symbol AAPL --plan result.json --html
+
 # 全市场扫描找今天能买的（取股池→流动性初筛→精简评分→新闻复核降级）
 python3 scripts/scanner.py --feed iex --adjustment split --top 20
 # 关闭新闻复核（只输出精简轮全部"是"，会漏掉被软红旗降级的）
@@ -399,8 +407,8 @@ python3 -m pytest tests/
 
 ## 约定
 
-- 改打分权重：只动 `scoring.py` 的 `ALPHA_WEIGHTS` / 各 `_f_*` 断点，`score()` 与回测自动跟随。
+- 改打分权重：只动 `scoring/constants.py` 的 `ALPHA_WEIGHTS` / `scoring/factors.py` 各 `_f_*` 断点，`score()` 与回测自动跟随。
 - 改回测篮子/窗口：只动 `backtest_common.py` 的 `UNIVERSE` / `WARMUP` / `HORIZONS`。
 - 新增纯函数请配单测（`tests/test_*.py`）；触网的回测脚本不进单测，靠手动跑验证。
 - 历史不足时函数返回 `None`（不抛错、不退化为 0），下游据此记「无法确认」。
-- 所有结论由 `scoring.py` 输出，不靠模型主观打分。模型的职责是用证据**解释**分数，而非自行评估。
+- 所有结论由 `scoring/` 包输出，不靠模型主观打分。模型的职责是用证据**解释**分数，而非自行评估。
