@@ -217,8 +217,9 @@ def _attach_ai_opinions(final_candidates: list[dict], scored_result: dict,
     """
     if not final_candidates or mode == "off":
         return None
-    # 离线复盘保持不触网可复现；除非显式 on
-    if offline and mode != "on":
+    # ``--input`` is a hard offline boundary; replay artifacts may be supplied
+    # in the input JSON, but live model calls never override it.
+    if offline:
         return None
     if mode == "auto" and not (ai_opinion_sdk_available() and ai_opinion_has_api_key()):
         return "未配置 ANTHROPIC_API_KEY，跳过 AI 意见（auto 模式）"
@@ -547,7 +548,7 @@ def _scan_offline(args) -> dict:
     if args.top is not None:
         final_candidates = final_candidates[:args.top]
 
-    # 离线复盘默认不触网；--ai-opinion on 时才对最终候选生成 AI 意见
+    # 离线复盘是硬边界：只使用输入 artifact，任何 live 开关都不触网。
     _attach_ai_opinions(final_candidates, scored_result, args.ai_opinion, cand_llm_ctx, offline=True)
 
     return {
@@ -638,7 +639,7 @@ def main():
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
 
-    if args.notify == "on":
+    if args.notify == "on" and not args.input:
         import subprocess as _sp
         skill_dir = os.path.dirname(os.path.abspath(__file__))
         _sp.run(

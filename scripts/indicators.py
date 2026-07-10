@@ -199,11 +199,11 @@ def _load_bars_input(path):
 def _account_context_from_args(args):
     if args.account_context_file:
         return _load_account_context(args.account_context_file)
-    if args.account_context == "off":
+    # ``--input`` is a hard offline boundary.  Explicit context files remain
+    # available for replay, but live switches never override that boundary.
+    if args.input:
         return None
-    # `--input` is the deterministic offline path; keep it network-free unless the
-    # caller explicitly asks for a live account read.
-    if args.input and args.account_context != "on":
+    if args.account_context == "off":
         return None
     try:
         return fetch_account_context(timeout=args.timeout)
@@ -216,9 +216,9 @@ def _account_context_from_args(args):
 def _finnhub_context_from_args(args, symbols):
     if args.finnhub_context_file:
         return _load_finnhub_context(args.finnhub_context_file)
-    if args.finnhub_context == "off":
+    if args.input:
         return None
-    if args.input and args.finnhub_context != "on":
+    if args.finnhub_context == "off":
         return None
     if args.finnhub_context == "auto" and not finnhub_has_api_key():
         return None
@@ -263,9 +263,9 @@ def _ai_opinion_from_args(args, result, llm_context):
     """
     if args.ai_opinion_context_file:
         return _load_ai_opinion_context(args.ai_opinion_context_file)
-    if args.ai_opinion == "off":
+    if args.input:
         return None
-    if args.input and args.ai_opinion != "on":
+    if args.ai_opinion == "off":
         return None
     if args.ai_opinion == "auto" and not (ai_opinion_sdk_available() and ai_opinion_has_api_key()):
         return None
@@ -314,10 +314,9 @@ def _apply_ai_opinion(result, artifact):
 def _snapshot_context_from_args(args, symbols):
     if args.snapshot_context_file:
         return _load_snapshot_context(args.snapshot_context_file)
-    if args.snapshot == "off":
+    if args.input:
         return None
-    # 离线模式默认不触网；除非显式 on
-    if args.input and args.snapshot != "on":
+    if args.snapshot == "off":
         return None
     ctx = fetch_snapshots(symbols, feed=args.feed, timeout=args.timeout)
     if args.snapshot == "on" and ctx.get("status") != "ok":

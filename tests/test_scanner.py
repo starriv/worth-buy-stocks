@@ -310,6 +310,14 @@ class TestAttachAiOpinions(unittest.TestCase):
         gen.assert_not_called()
         self.assertIsNone(flag)
 
+    def test_offline_explicit_on_still_does_not_call(self):
+        result = self._scored_result()
+        cands = self._candidates(result)
+        with unittest.mock.patch.object(S, "opinions_for_result") as gen:
+            flag = S._attach_ai_opinions(cands, result, "on", offline=True)
+        gen.assert_not_called()
+        self.assertIsNone(flag)
+
     def test_calls_scoped_to_final_candidates_only(self):
         result = self._scored_result(("STRG", "STR2"))
         cands = self._candidates(result)[:1]  # 模拟 top-N 截断后只剩 1 个
