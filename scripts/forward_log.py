@@ -162,17 +162,26 @@ def write_jsonl(path: str, records: list[dict[str, Any]]) -> None:
 
 # ---- CLI 子命令（触网） ----
 
-def _fetch(symbols: list[str], lookback_days: int, feed: str, adjustment: str, timeout: int):
+def _fetch(
+    symbols: list[str], lookback_days: int, feed: str, adjustment: str, timeout: int,
+    *, cache_mode: str = "auto", cache_db: str | None = None,
+):
     end = datetime.date.today().isoformat()
     start = (datetime.date.today() - datetime.timedelta(days=lookback_days)).isoformat()
-    return fetch_bars(symbols, start, end, feed, adjustment, 10000, timeout)
+    return fetch_bars(
+        symbols, start, end, feed, adjustment, 10000, timeout,
+        cache_mode=cache_mode, cache_db=cache_db,
+    )
 
 
 def cmd_record(args) -> int:
     symbols = ([s.strip().upper() for s in args.symbols.split(",") if s.strip()]
                if args.symbols else list(UNIVERSE))
     syms = list(dict.fromkeys(symbols + BENCH))
-    bars, used_feed, note = _fetch(syms, RECORD_LOOKBACK_DAYS, args.feed, args.adjustment, args.timeout)
+    bars, used_feed, note = _fetch(
+        syms, RECORD_LOOKBACK_DAYS, args.feed, args.adjustment, args.timeout,
+        cache_mode=args.cache, cache_db=args.cache_db,
+    )
     if note:
         logging.info(note)
     result = build_result(syms, bars, used_feed, args.adjustment)
@@ -216,7 +225,10 @@ def cmd_evaluate(args) -> int:
     syms = sorted({r["symbol"] for r in records} | {"SPY"})
     earliest = min(r["run_date"] for r in records)
     lookback = (datetime.date.today() - datetime.date.fromisoformat(earliest)).days + 30
-    bars, _, note = _fetch(syms, lookback, args.feed, args.adjustment, args.timeout)
+    bars, _, note = _fetch(
+        syms, lookback, args.feed, args.adjustment, args.timeout,
+        cache_mode=args.cache, cache_db=args.cache_db,
+    )
     if note:
         logging.info(note)
     closes = {s: {b["t"][:10]: b["c"] for b in bars.get(s, [])} for s in syms}
@@ -241,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--feed", default="iex")
     p.add_argument("--adjustment", default="split")
     p.add_argument("--timeout", type=int, default=120)
+    p.add_argument("--cache", choices=("auto", "refresh", "off"), default="auto")
+    p.add_argument("--cache-db", help="SQLite 文件路径；默认 skill 根目录 data/market-data.sqlite3")
     sub = p.add_subparsers(dest="cmd", required=True)
     pr = sub.add_parser("record", help="对篮子打分并追加当日记录（同日重跑覆盖）")
     pr.add_argument("--symbols", help="逗号分隔；默认回测篮子 UNIVERSE")

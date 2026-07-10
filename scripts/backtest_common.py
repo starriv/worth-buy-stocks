@@ -150,12 +150,18 @@ class Panel:
         return build_result(self.syms, sliced, self.used_feed, self.adjustment)["symbols"]
 
 
-def load_panel(feed, adjustment, timeout, history_days=HISTORY_DAYS):
+def load_panel(
+    feed, adjustment, timeout, history_days=HISTORY_DAYS,
+    *, cache_mode="auto", cache_db=None,
+):
     end = datetime.date.today().isoformat()
     start = (datetime.date.today() - datetime.timedelta(days=history_days)).isoformat()
     syms = UNIVERSE + BENCH
     logging.info(f"拉取 {len(syms)} 只标的日线 {start}→{end} …")
-    bars, used_feed, note = fetch_bars(syms, start, end, feed, adjustment, 10000, timeout)
+    bars, used_feed, note = fetch_bars(
+        syms, start, end, feed, adjustment, 10000, timeout,
+        cache_mode=cache_mode, cache_db=cache_db,
+    )
     if note:
         logging.info(note)
     return Panel(bars, used_feed, adjustment)

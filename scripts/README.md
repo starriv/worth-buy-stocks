@@ -25,7 +25,7 @@
 | 外部能力隔离 | 账户、Finnhub、Snapshot 和 AI 意见各自失败时独立降级 |
 | 数据角色固定 | 日线进入评分；新闻只降级；账户只调敞口建议；AI 意见只写入补充信息 |
 | 凭证不进入结果 | 密钥由 `local_env.py` 读取；账户适配层过滤账号标识 |
-| 日线口径稳定 | 默认使用 `iex`；盘中剔除尚未收盘的当日日线，Snapshot 单独展示 |
+| 日线口径稳定 | 默认使用 `iex`；SQLite 只向评分提供 final rows，盘中 live/Snapshot 单独展示 |
 
 `indicators.py` 保留旧版再导出，已有的 `import indicators as I` 仍可使用。新增逻辑应放到职责对应的模块，不继续扩大 CLI 文件。
 
@@ -47,7 +47,9 @@ flowchart LR
     end
 
     subgraph ADAPTER["适配与采集"]
-        D1["fetching.py<br/>日线与快照"]
+        D1["fetching.py<br/>兼容门面与 Alpaca transport"]
+        CP["market_data_cache.py<br/>session / read-through 策略"]
+        ST["market_data_store.py<br/>SQLite repository"]
         D2["portfolio.py<br/>账户与持仓"]
         D3["finnhub.py<br/>补充上下文"]
         CLI["indicators.py<br/>并行编排"]
@@ -64,7 +66,9 @@ flowchart LR
     O["最终 JSON"]
     C["chart.py<br/>终端 / HTML K 线"]
 
-    A --> D1 --> CLI
+    DB["data/market-data.sqlite3<br/>final · live · snapshot · coverage"]
+    A --> D1 --> CP --> CLI
+    CP <--> ST <--> DB
     A --> D2 --> CLI
     F --> D3 --> CLI
     E --> D3
@@ -75,12 +79,12 @@ flowchart LR
     O --> C
 
     class A,F,E source;
-    class D1,D2,D3,CLI,AI adapter;
+    class D1,CP,ST,D2,D3,CLI,AI adapter;
     class M,P,S core;
     class B,O,C output;
 ```
 
-`indicators.py` 会并行采集 bars、账户、Finnhub 和 Snapshot；Finnhub 内部再按 symbol 并行。`pipeline.build_result()` 负责补齐 SPY / QQQ 相对强度和市场状态，再逐只调用 `scoring.score()`。Snapshot 与 Finnhub 原始上下文写入 `supplemental`，不进入排名分。
+`indicators.py` 会并行取得 bars、账户、Finnhub 和 Snapshot；bars/snapshot 先由 session-aware cache 决定 DB 或 Alpaca，Finnhub 内部再按 symbol 并行。`pipeline.build_result()` 负责补齐 SPY / QQQ 相对强度和市场状态，再逐只调用 `scoring.score()`。Snapshot 与 Finnhub 原始上下文写入 `supplemental`，不进入排名分。
 
 `scanner.py` 复用同一条分析与评分链路，额外执行：股池获取 → 流动性初筛 → 批量评分 → 候选提取 → 新闻复核。无需在外层重复拆分抓取步骤。
 
@@ -250,7 +254,10 @@ AI 意见载荷采用字段白名单，输入中不含 `verdict`、`composite` �
 | `scoring/gates.py` | 趋势闸门、事件封顶、确认阈值和数据标记 |
 | `scoring/trade_plan.py` | 反波动率仓位与计划价位 |
 | `scoring/account_overlay.py` | 当前持仓、目标敞口和持仓结论调整 |
-| `fetching.py` | Alpaca 日线与 Snapshot 拉取、分页、去重和完成日线处理 |
+| `fetching.py` | 日线/Snapshot 兼容门面与纯 Alpaca transport；支持 `auto\|refresh\|off` |
+| `market_data_cache.py` | XNYS session 分类、缺口/重叠校验、final/live 分流和故障回退 |
+| `market_data_store.py` | SQLite schema、WAL、coverage、final/live/snapshot repository |
+| `cache_admin.py` | 只读 status/integrity、warm/refresh 与受保护 purge |
 | `portfolio.py` | Alpaca 账户和持仓读取、归一化与敏感字段过滤 |
 | `finnhub.py` | Finnhub 请求、错误归一化和事件风险候选提炼 |
 | `ai_opinion.py` | 可选的评分后第二意见与结构校验 |
@@ -280,6 +287,10 @@ python3 scripts/indicators.py --symbols AAPL,SPY,QQQ \
 # 全市场扫描；可用 --entry pullback 只保留回调拐点
 python3 scripts/scanner.py --feed iex --top 20
 
+# 缓存默认 auto；可显式刷新或关闭，也可覆盖 DB 路径
+python3 scripts/indicators.py --symbols AAPL,SPY,QQQ --cache refresh
+python3 scripts/scanner.py --symbols AAPL,MSFT --cache off
+
 # 生成带计划价位线的终端 K 线和 HTML 图
 python3 scripts/indicators.py --symbols AAPL,SPY,QQQ > result.json
 python3 scripts/chart.py --symbol AAPL --plan result.json --html
@@ -304,6 +315,23 @@ python3 scripts/scanner.py --input scan_fixture.json --verify-news off
 # 用离线 bars 画图
 python3 scripts/chart.py --input bars.json --symbol AAPL --count 30
 ```
+
+`--input` 是硬离线边界：不访问 SQLite，不触发 Alpaca、Finnhub、账户、AI 或通知；只读取输入 JSON 和显式 context 文件。
+
+### SQLite 缓存治理
+
+默认路径为 skill 根目录 `data/market-data.sqlite3`；可设置 `WORTH_BUY_STOCKS_DB`，或在支持的 CLI 上使用 `--cache-db`。网络请求不持有写事务；scanner worker 使用独立连接，SQLite 使用 WAL 与 busy timeout。
+
+```bash
+python3 scripts/cache_admin.py status
+python3 scripts/cache_admin.py integrity-check
+python3 scripts/cache_admin.py warm --symbols AAPL,SPY,QQQ
+python3 scripts/cache_admin.py refresh --symbols AAPL,SPY,QQQ --start 2025-01-01
+python3 scripts/cache_admin.py purge --symbols AAPL --start 2026-07-01 --end 2026-07-10
+python3 scripts/cache_admin.py purge --all
+```
+
+`status`/`integrity-check` 不创建或迁移缺失数据库。`purge` 无 symbol、完整日期范围或显式 `--all` 时拒绝执行；范围清理会同步切开 coverage，下一次 `auto` 只补被清理的缺口。
 
 ### 回测与前瞻日志
 

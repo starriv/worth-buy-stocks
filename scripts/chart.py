@@ -372,7 +372,8 @@ def _fetch(symbol, args):
     end = args.end or dft_end
     bars, _used_feed, _note = fetch_bars(
         [symbol.upper()], start, end, args.feed,
-        args.adjustment, args.limit, args.timeout)
+        args.adjustment, args.limit, args.timeout,
+        cache_mode=args.cache, cache_db=args.cache_db)
     blist = bars.get(symbol.upper())
     if not blist:
         raise RuntimeError(f"未取到 {symbol} 的日线数据")
@@ -403,6 +404,14 @@ def main():
     p.add_argument("--adjustment", default="split")
     p.add_argument("--limit", type=int, default=10000)
     p.add_argument("--timeout", type=int, default=30)
+    p.add_argument(
+        "--cache", choices=("auto", "refresh", "off"), default="auto",
+        help="历史日线缓存：auto=读穿 SQLite，refresh=强制刷新，off=仅远端",
+    )
+    p.add_argument(
+        "--cache-db",
+        help="SQLite 文件路径；默认 skill 根目录 data/market-data.sqlite3",
+    )
     args = p.parse_args()
 
     if args.input == "-" and args.plan == "-":

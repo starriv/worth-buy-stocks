@@ -22,8 +22,10 @@ from backtest_common import (  # noqa: E402
 )
 
 
-def run(feed, adjustment, timeout):
-    panel = load_panel(feed, adjustment, timeout)
+def run(feed, adjustment, timeout, *, cache_mode="auto", cache_db=None):
+    panel = load_panel(
+        feed, adjustment, timeout, cache_mode=cache_mode, cache_db=cache_db
+    )
     if len(panel.calendar) < WARMUP + max(HORIZONS) + STEP:
         logging.warning("历史不足，无法回测")
         return
@@ -123,8 +125,13 @@ def main():
     p.add_argument("--feed", default="iex", help="Alpaca 数据源，默认 iex；无 SIP 权限不要用 sip")
     p.add_argument("--adjustment", default="split")
     p.add_argument("--timeout", type=int, default=60)
+    p.add_argument("--cache", choices=("auto", "refresh", "off"), default="auto")
+    p.add_argument("--cache-db", help="SQLite 文件路径；默认 skill 根目录 data/market-data.sqlite3")
     args = p.parse_args()
-    run(args.feed, args.adjustment, args.timeout)
+    run(
+        args.feed, args.adjustment, args.timeout,
+        cache_mode=args.cache, cache_db=args.cache_db,
+    )
 
 
 if __name__ == "__main__":

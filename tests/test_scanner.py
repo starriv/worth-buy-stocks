@@ -5,6 +5,7 @@
 运行：python3 -m unittest discover -s tests
 """
 import json
+import datetime as dt
 import os
 import sys
 import tempfile
@@ -15,6 +16,8 @@ from datetime import date, timedelta
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import scanner as S  # noqa: E402
+import fetching as F  # noqa: E402
+from market_data_store import MarketDataStore  # noqa: E402
 from pipeline import build_result  # noqa: E402
 
 
@@ -100,6 +103,178 @@ class TestFilterLiquidity(unittest.TestCase):
 
     def test_unavailable_context_returns_empty(self):
         self.assertEqual(S.filter_liquidity({"status": "unavailable"}, 5, 50000), [])
+
+
+class TestScannerCacheIntegration(unittest.TestCase):
+    SESSIONS = [
+        {"session_date": f"2026-07-{day:02d}", "open_at": "09:30", "close_at": "16:00"}
+        for day in (6, 7, 8, 9, 10)
+    ]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = os.path.join(self.tmp.name, "scanner.sqlite3")
+
+    @staticmethod
+    def _now(text):
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+    @staticmethod
+    def _snapshot_remote(symbols, feed, timeout, *, now_fn=None):
+        return {
+            "status": "ok", "as_of": "2026-07-10T14:00:00Z", "feed": feed,
+            "symbols": {
+                symbol: {
+                    "symbol": symbol,
+                    "daily_bar": {
+                        "date": "2026-07-10", "open": 100, "high": 102,
+                        "low": 99, "close": 101, "volume": 100_000,
+                    },
+                }
+                for symbol in symbols
+            },
+        }
+
+    @staticmethod
+    def _bars_remote(symbols, start, end, feed, adjustment, limit, timeout):
+        rows = {
+            symbol: [
+                {
+                    "t": f"2026-07-{day:02d}T04:00:00Z", "o": 99 + day,
+                    "h": 101 + day, "l": 98 + day, "c": 100 + day,
+                    "v": 100_000,
+                }
+                for day in (6, 7, 8, 9)
+                if start <= f"2026-07-{day:02d}" <= end
+            ]
+            for symbol in symbols
+        }
+        return rows, feed, None
+
+    def test_eight_snapshot_workers_write_idempotently_then_premarket_is_db_only(self):
+        symbols = [f"T{i:02d}" for i in range(16)]
+        open_now = lambda: self._now("2026-07-10T14:00:00Z")
+        with unittest.mock.patch.object(
+            F, "_fetch_market_calendar", return_value=self.SESSIONS
+        ) as calendar, unittest.mock.patch.object(
+            F, "_fetch_snapshots_remote", side_effect=self._snapshot_remote
+        ) as remote:
+            pool, flags = S.fetch_liquidity(
+                symbols, "iex", 5, 50_000, chunk=2, timeout=30,
+                cache_db=self.db, now_fn=open_now,
+            )
+        self.assertEqual(flags, [])
+        self.assertEqual(len(pool), 16)
+        self.assertEqual(remote.call_count, 8)
+        self.assertEqual(calendar.call_count, 1)
+
+        premarket_now = lambda: self._now("2026-07-10T12:00:00Z")
+        with unittest.mock.patch.object(F, "_fetch_snapshots_remote") as warm_remote, \
+             unittest.mock.patch.object(F, "_fetch_market_calendar") as warm_calendar:
+            warm, warm_flags = S.fetch_liquidity(
+                symbols, "iex", 5, 50_000, chunk=2, timeout=30,
+                cache_db=self.db, now_fn=premarket_now,
+            )
+        warm_remote.assert_not_called()
+        warm_calendar.assert_not_called()
+        self.assertEqual(warm_flags, [])
+        self.assertEqual(warm, pool)
+        store = MarketDataStore(self.db)
+        self.assertEqual(len(store.get_latest_snapshots(symbols, feed="iex")["symbols"]), 16)
+        self.assertEqual(len(store.get_live_daily_bars(symbols, feed="iex")), 16)
+
+    def test_warm_bars_are_db_only_and_partial_miss_fetches_only_new_symbol(self):
+        symbols = [f"T{i:02d}" for i in range(14)] + ["SPY", "QQQ"]
+        now_fn = lambda: self._now("2026-07-10T12:00:00Z")
+        with unittest.mock.patch.object(
+            F, "_fetch_market_calendar", return_value=self.SESSIONS
+        ) as calendar, unittest.mock.patch.object(
+            F, "_fetch_bars_remote", side_effect=self._bars_remote
+        ) as remote:
+            cold, cold_flags = S.fetch_pool_bars(
+                symbols, "2026-07-06", "2026-07-10", "iex", "split",
+                chunk=2, timeout=30, cache_db=self.db, now_fn=now_fn,
+            )
+            cold_calls = remote.call_count
+            remote.reset_mock()
+            warm, warm_flags = S.fetch_pool_bars(
+                symbols, "2026-07-06", "2026-07-10", "iex", "split",
+                chunk=2, timeout=30, cache_db=self.db, now_fn=now_fn,
+            )
+            self.assertEqual(remote.call_count, 0)
+            partial, partial_flags = S.fetch_pool_bars(
+                [*symbols, "NEW"], "2026-07-06", "2026-07-10", "iex", "split",
+                chunk=2, timeout=30, cache_db=self.db, now_fn=now_fn,
+            )
+        self.assertEqual(calendar.call_count, 1)
+        self.assertEqual(cold_calls, 8)
+        self.assertEqual(cold_flags, [])
+        self.assertEqual(warm_flags, [])
+        self.assertEqual(cold, warm)
+        self.assertEqual(partial_flags, [])
+        fetched_symbols = [symbol for call in remote.call_args_list for symbol in call.args[0]]
+        self.assertEqual(fetched_symbols, ["NEW"])
+        self.assertIn("NEW", partial)
+
+    def test_scanner_cli_exposes_cache_controls(self):
+        args = S._build_args([
+            "--symbols", "AAPL", "--cache", "off",
+            "--cache-db", "/tmp/scanner.sqlite3",
+        ])
+        self.assertEqual(args.cache, "off")
+        self.assertEqual(args.cache_db, "/tmp/scanner.sqlite3")
+
+    def test_live_snapshot_never_changes_scanner_score_last_date(self):
+        days = []
+        day = dt.date(2026, 7, 9)
+        while len(days) < 260:
+            if day.weekday() < 5:
+                days.append(day)
+            day -= dt.timedelta(days=1)
+        days.reverse()
+        bars = {
+            symbol: [
+                {
+                    "t": f"{session.isoformat()}T04:00:00Z",
+                    "o": 100 + i * slope, "h": 102 + i * slope,
+                    "l": 99 + i * slope, "c": 101 + i * slope,
+                    "v": 1_000_000 + i,
+                }
+                for i, session in enumerate(days)
+            ]
+            for symbol, slope in (("STRG", 0.4), ("SPY", 0.1), ("QQQ", 0.12))
+        }
+        store = MarketDataStore(self.db)
+        store.commit_daily_sync(
+            bars, list(bars), feed="iex", adjustment="split",
+            start_date=days[0].isoformat(), end_date=days[-1].isoformat(),
+        )
+        store.upsert_snapshot_context({
+            "status": "ok", "as_of": "2026-07-10T14:00:00Z", "feed": "iex",
+            "symbols": {
+                "STRG": {
+                    "symbol": "STRG",
+                    "daily_bar": {
+                        "date": "2026-07-10", "open": 205, "high": 210,
+                        "low": 204, "close": 209, "volume": 2_000_000,
+                    },
+                }
+            },
+        })
+        now_fn = lambda: self._now("2026-07-10T14:00:00Z")
+        with unittest.mock.patch.object(
+            F, "_fetch_market_calendar", return_value=self.SESSIONS
+        ), unittest.mock.patch.object(F, "_fetch_bars_remote") as remote:
+            final_bars, flags = S.fetch_pool_bars(
+                list(bars), days[0].isoformat(), "2026-07-10", "iex", "split",
+                chunk=2, cache_db=self.db, now_fn=now_fn,
+            )
+        remote.assert_not_called()
+        self.assertEqual(flags, [])
+        self.assertEqual(final_bars["STRG"][-1]["t"][:10], "2026-07-09")
+        result = build_result(list(bars), final_bars, "iex", "split")
+        self.assertEqual(result["symbols"]["STRG"]["last_date"], "2026-07-09")
 
 
 class TestExtractCandidates(unittest.TestCase):

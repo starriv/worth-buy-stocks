@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Alpaca Market Data 日线拉取：分页、去重、feed 受限自动回退。
+"""Alpaca Market Data：SQLite read-through 日线与当日 snapshot transport。
 
 只调用本机 `alpaca` CLI 的 `data multi-bars`，不下单、不打印凭证。
 sip 等高级 feed 因订阅受限（403/forbidden）时自动回退 iex 一次。
@@ -7,7 +7,32 @@ sip 等高级 feed 因订阅受限（403/forbidden）时自动回退 iex 一次�
 import datetime
 import json
 import subprocess
+import threading
 from collections import defaultdict
+
+from market_data_cache import CACHE_MODES, CachePolicyError, MarketDataCache
+from market_data_store import MarketDataCacheError, MarketDataStore, resolve_db_path
+
+
+_STORE_LOCK = threading.Lock()
+_STORE_CACHE = {}
+
+
+def _shared_store(cache_db, now_fn):
+    """Reuse one store (schema check, WAL setup) per database path and process.
+
+    Injected clocks are test-only; they bypass the cache so each call keeps its
+    own deterministic time source.
+    """
+    if now_fn is not None:
+        return MarketDataStore(cache_db, now_fn=now_fn)
+    path = resolve_db_path(cache_db)
+    with _STORE_LOCK:
+        store = _STORE_CACHE.get(path)
+        if store is None:
+            store = MarketDataStore(path)
+            _STORE_CACHE[path] = store
+    return store
 
 
 class FeedLimitError(RuntimeError):
@@ -59,7 +84,7 @@ def _fetch_feed(symbols, start, end, feed, adjustment, limit, timeout):
     return {sym: [bymt[t] for t in sorted(bymt)] for sym, bymt in out.items()}
 
 
-def _drop_unclosed_today(bars_map):
+def _drop_unclosed_today(bars_map, now=None):
     """盘中运行时剔除今天的未完成日线；收盘后原样保留。
 
     盘中的当日 bar 只含开盘以来的部分量价，会污染 RSI/量能比/反转日检测等
@@ -68,7 +93,11 @@ def _drop_unclosed_today(bars_map):
     """
     try:
         from zoneinfo import ZoneInfo
-        now_et = datetime.datetime.now(ZoneInfo("America/New_York"))
+        current = now() if callable(now) else now
+        current = current or datetime.datetime.now(datetime.timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=datetime.timezone.utc)
+        now_et = current.astimezone(ZoneInfo("America/New_York"))
         market_closed = (now_et.hour, now_et.minute) >= (16, 5)
         today = now_et.date().isoformat()
     except Exception:  # 无 tzdata 时保守回退：UTC 21:05 前视为未收盘
@@ -89,11 +118,8 @@ def _drop_unclosed_today(bars_map):
     return out, note
 
 
-def fetch_bars(symbols, start, end, feed, adjustment, limit, timeout):
-    """拉取日线；sip 等 feed 受限时自动回退 iex 一次；盘中剔除今日未完成 bar。
-
-    返回 (bars_dict, used_feed, note)。note 为回退/剔除说明或 None。
-    """
+def _fetch_bars_remote(symbols, start, end, feed, adjustment, limit, timeout):
+    """Remote-only bars transport with feed fallback and no cache/session policy."""
     try:
         bars = _fetch_feed(symbols, start, end, feed, adjustment, limit, timeout)
         used_feed, note = feed, None
@@ -103,10 +129,90 @@ def fetch_bars(symbols, start, end, feed, adjustment, limit, timeout):
         note = f"{feed} feed 受限({e})，已回退 iex"
         bars = _fetch_feed(symbols, start, end, "iex", adjustment, limit, timeout)
         used_feed = "iex"
-    bars, drop_note = _drop_unclosed_today(bars)
-    if drop_note:
-        note = f"{note}；{drop_note}" if note else drop_note
     return bars, used_feed, note
+
+
+def fetch_bars(
+    symbols, start, end, feed, adjustment, limit, timeout,
+    *, cache_mode="auto", cache_db=None, now_fn=None,
+):
+    """Load completed daily bars through the SQLite read-through cache.
+
+    返回 (bars_dict, used_feed, note)。note 为回退/剔除说明或 None。
+    ``cache_mode=off`` restores the remote-only path; ``refresh`` replaces the
+    requested completed range from Alpaca.  Cache/calendar failures conservatively
+    fall back to remote data for the current invocation.
+    """
+    mode = str(cache_mode or "auto").lower()
+    if mode not in CACHE_MODES:
+        raise ValueError(f"cache_mode 必须是 {', '.join(CACHE_MODES)}")
+    if mode == "off":
+        bars, used_feed, note = _fetch_bars_remote(
+            symbols, start, end, feed, adjustment, limit, timeout
+        )
+        bars, drop_note = _drop_unclosed_today(bars, now=now_fn)
+        if drop_note:
+            note = f"{note}；{drop_note}" if note else drop_note
+        return bars, used_feed, note
+
+    try:
+        store = _shared_store(cache_db, now_fn)
+        cache = MarketDataCache(
+            store,
+            remote_bars_fetcher=_fetch_bars_remote,
+            calendar_fetcher=_fetch_market_calendar,
+        )
+        return cache.load_bars(
+            symbols, start, end, feed, adjustment, limit, timeout, mode=mode
+        )
+    except (MarketDataCacheError, CachePolicyError, OSError) as exc:
+        bars, used_feed, note = _fetch_bars_remote(
+            symbols, start, end, feed, adjustment, limit, timeout
+        )
+        bars, drop_note = _drop_unclosed_today(bars, now=now_fn)
+        fallback = f"SQLite 缓存不可用，已回退远端：{exc}"
+        note = f"{note}；{fallback}" if note else fallback
+        if drop_note:
+            note = f"{note}；{drop_note}"
+        return bars, used_feed, note
+
+
+def _fetch_market_calendar(start, end, timeout):
+    """Fetch and normalize XNYS regular sessions for the cache policy."""
+    raw = _run_json(
+        [
+            "alpaca", "calendar", "market", "--market", "XNYS",
+            "--start", start, "--end", end,
+            "--quiet",
+        ],
+        timeout,
+    )
+    if isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, dict):
+        items = raw.get("calendar") or raw.get("sessions") or []
+    else:
+        items = []
+    sessions = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        session_date = item.get("date") or item.get("session_date")
+        open_at = (
+            item.get("open") or item.get("open_at") or item.get("session_open")
+            or item.get("core_start")
+        )
+        close_at = (
+            item.get("close") or item.get("close_at") or item.get("session_close")
+            or item.get("core_end")
+        )
+        if session_date and open_at and close_at:
+            sessions.append({
+                "session_date": str(session_date)[:10],
+                "open_at": str(open_at),
+                "close_at": str(close_at),
+            })
+    return sessions
 
 
 def _run_json(cmd, timeout):
@@ -218,8 +324,8 @@ def _snapshot_date(value):
         return text[:10]
 
 
-def fetch_snapshots(symbols, feed="iex", timeout=30):
-    """Fetch same-day snapshots via `alpaca data multi-snapshots` and normalize.
+def _fetch_snapshots_remote(symbols, feed="iex", timeout=30, *, now_fn=None):
+    """Remote-only `alpaca data multi-snapshots` transport and normalization.
 
     Returns ``{"status", "as_of", "feed", "symbols"}``. Snapshots are supplemental
     only and never feed score; any failure degrades to ``status=unavailable``
@@ -251,9 +357,56 @@ def fetch_snapshots(symbols, feed="iex", timeout=30):
             symbols_out[sym] = norm
     if not symbols_out:
         return {"status": "unavailable", "reason": "multi-snapshots 返回空数据"}
+    current = now_fn() if callable(now_fn) else datetime.datetime.now(datetime.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=datetime.timezone.utc)
     return {
         "status": "ok",
-        "as_of": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "as_of": current.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         "feed": feed,
         "symbols": symbols_out,
     }
+
+
+def fetch_snapshots(
+    symbols, feed="iex", timeout=30, *, adjustment="split",
+    cache_mode="auto", cache_db=None, now_fn=None,
+):
+    """Load session-aware snapshots through SQLite while preserving old shape.
+
+    During regular trading the remote transport runs and atomically updates
+    ``latest_snapshots`` plus ``live_daily_bars``.  Pre-market, closed and
+    non-trading sessions read SQLite and synthesize missing entries from the
+    latest completed daily bar.  Cache failures conservatively fall back to the
+    remote transport for this invocation.
+    """
+    mode = str(cache_mode or "auto").lower()
+    if mode not in CACHE_MODES:
+        raise ValueError(f"cache_mode 必须是 {', '.join(CACHE_MODES)}")
+    if mode == "off":
+        return _fetch_snapshots_remote(symbols, feed, timeout, now_fn=now_fn)
+
+    remote = lambda syms, source, seconds: _fetch_snapshots_remote(  # noqa: E731
+        syms, source, seconds, now_fn=now_fn
+    )
+    try:
+        store = _shared_store(cache_db, now_fn)
+        cache = MarketDataCache(
+            store,
+            remote_bars_fetcher=_fetch_bars_remote,
+            calendar_fetcher=_fetch_market_calendar,
+            remote_snapshots_fetcher=remote,
+        )
+        return cache.load_snapshots(
+            symbols, feed, timeout, adjustment=adjustment, mode=mode
+        )
+    except (MarketDataCacheError, CachePolicyError, OSError) as exc:
+        context = remote(list(symbols or []), feed, timeout)
+        if context.get("status") == "ok":
+            context = dict(context)
+            context["cache_note"] = f"SQLite snapshot 缓存不可用，已回退远端：{exc}"
+            return context
+        context = dict(context)
+        reason = context.get("reason") or "snapshot 远端不可用"
+        context["reason"] = f"{reason}；SQLite snapshot 缓存不可用：{exc}"
+        return context

@@ -295,7 +295,9 @@ def fetch_active_assets(exchanges=("NYSE", "NASDAQ"), asset_class="us_equity", t
 
 
 def fetch_liquidity(symbols: list[str], feed: str, min_price: float, min_volume: float,
-                    chunk: int = DEFAULT_SNAPSHOT_CHUNK, timeout: int = 30) -> tuple[list[dict], list[str]]:
+                    chunk: int = DEFAULT_SNAPSHOT_CHUNK, timeout: int = 30, *,
+                    adjustment: str = "split", cache_mode: str = "auto",
+                    cache_db: str | None = None, now_fn=None) -> tuple[list[dict], list[str]]:
     """分块拉 snapshot 并按流动性过滤。返回 (pool, data_flags)。单块失败跳过不阻断。
 
     分块之间并行（ThreadPoolExecutor），耗时从「各 chunk 之和」降到「最慢 chunk」。
@@ -309,7 +311,10 @@ def fetch_liquidity(symbols: list[str], feed: str, min_price: float, min_volume:
 
     def _one(i_batch):
         i, batch = i_batch
-        ctx = fetch_snapshots(batch, feed=feed, timeout=timeout)
+        ctx = fetch_snapshots(
+            batch, feed=feed, timeout=timeout, adjustment=adjustment,
+            cache_mode=cache_mode, cache_db=cache_db, now_fn=now_fn,
+        )
         return i, ctx
 
     workers = max(1, min(len(batches), 8))
@@ -320,6 +325,8 @@ def fetch_liquidity(symbols: list[str], feed: str, min_price: float, min_volume:
         if ctx.get("status") != "ok":
             data_flags.append(f"snapshot 分块拉取失败已跳过: {ctx.get('reason')}")
             continue
+        if ctx.get("stale") or "不可用" in str(ctx.get("cache_note") or ""):
+            data_flags.append(str(ctx.get("cache_note")))
         for sym, snap in (ctx.get("symbols") or {}).items():
             merged[sym] = snap
     snap_ctx = {"status": "ok", "symbols": merged} if merged else {"status": "unavailable", "reason": "无 snapshot"}
@@ -328,7 +335,9 @@ def fetch_liquidity(symbols: list[str], feed: str, min_price: float, min_volume:
 
 
 def fetch_pool_bars(symbols: list[str], start: str, end: str, feed: str, adjustment: str,
-                    chunk: int = DEFAULT_BARS_CHUNK, timeout: int = 30) -> tuple[dict, list[str]]:
+                    chunk: int = DEFAULT_BARS_CHUNK, timeout: int = 30, *,
+                    cache_mode: str = "auto", cache_db: str | None = None,
+                    now_fn=None) -> tuple[dict, list[str]]:
     """分块拉两年日线，合并 {symbol: [bar]}。SPY/QQQ 若缺失单独补拉（regime 依赖）。
 
     分块之间并行（ThreadPoolExecutor），耗时从「各 chunk 之和」降到「最慢 chunk」。
@@ -342,8 +351,12 @@ def fetch_pool_bars(symbols: list[str], start: str, end: str, feed: str, adjustm
 
     def _one(batch):
         try:
-            b_bars, _used_feed, _note = fetch_bars(batch, start, end, feed, adjustment, 10000, timeout)
-            return b_bars, None
+            b_bars, _used_feed, note = fetch_bars(
+                batch, start, end, feed, adjustment, 10000, timeout,
+                cache_mode=cache_mode, cache_db=cache_db, now_fn=now_fn,
+            )
+            degraded = note if "不可用" in str(note or "") or "回退" in str(note or "") else None
+            return b_bars, degraded
         except Exception as e:  # noqa: BLE001
             return None, f"bars 分块拉取失败已跳过: {e}"
 
@@ -354,13 +367,16 @@ def fetch_pool_bars(symbols: list[str], start: str, end: str, feed: str, adjustm
     for chunk_bars, err in results:
         if err:
             data_flags.append(err)
-            continue
-        bars.update(chunk_bars)
+        if chunk_bars:
+            bars.update(chunk_bars)
     # 确保基准在列（build_result 的 market_risk_off 依赖 SPY.above_MA200）
     for bench in BENCHMARK_SYMBOLS:
         if bench not in bars:
             try:
-                b_bars, _u, _n = fetch_bars([bench], start, end, feed, adjustment, 10000, timeout)
+                b_bars, _u, _n = fetch_bars(
+                    [bench], start, end, feed, adjustment, 10000, timeout,
+                    cache_mode=cache_mode, cache_db=cache_db, now_fn=now_fn,
+                )
                 bars.update(b_bars)
             except Exception as e:  # noqa: BLE001
                 data_flags.append(f"基准 {bench} 日线拉取失败: {e}")
@@ -425,6 +441,7 @@ def scan(args) -> dict:
     pool, snap_flags = fetch_liquidity(
         pool_syms, feed, args.min_price, args.min_volume,
         chunk=args.snapshot_chunk, timeout=args.timeout,
+        adjustment=adjustment, cache_mode=args.cache, cache_db=args.cache_db,
     )
     data_flags.extend(snap_flags)
     pool_syms = [p["symbol"] for p in pool]
@@ -437,6 +454,7 @@ def scan(args) -> dict:
     bars, bars_flags = fetch_pool_bars(
         score_syms, start, end, feed, adjustment,
         chunk=args.bars_chunk, timeout=args.timeout,
+        cache_mode=args.cache, cache_db=args.cache_db,
     )
     data_flags.extend(bars_flags)
     lean_result = build_result(score_syms, bars, feed, adjustment)
@@ -596,6 +614,14 @@ def _build_args(argv=None) -> argparse.Namespace:
     p.add_argument("--start", help="默认约两年前")
     p.add_argument("--end", help="默认今天")
     p.add_argument("--timeout", type=int, default=30)
+    p.add_argument(
+        "--cache", choices=("auto", "refresh", "off"), default="auto",
+        help="行情缓存：auto=按 session 读穿 SQLite，refresh=强制刷新，off=仅远端",
+    )
+    p.add_argument(
+        "--cache-db",
+        help="SQLite 文件路径；默认 skill 根目录 data/market-data.sqlite3",
+    )
     p.add_argument("--input", help="离线模式：读预取 JSON {assets,snapshots,bars,finnhub}，不触网")
     p.add_argument("--notify", choices=("on", "off"), default="off", help="on=把摘要推 Telegram")
     return p.parse_args(argv)

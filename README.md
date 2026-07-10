@@ -44,6 +44,30 @@ python3 scripts/indicators.py --symbols NVDA,SPY,QQQ
 python3 scripts/scanner.py --top 20
 ```
 
+## 本地行情缓存
+
+历史已完成日线和最新 snapshot 默认通过 SQLite 读穿缓存，数据库位于 skill 根目录的 `data/market-data.sqlite3`。可用 `WORTH_BUY_STOCKS_DB` 或各 CLI 的 `--cache-db` 覆盖路径；`data/` 是本地运行数据，不应提交。
+
+- `--cache auto`（默认）：完整覆盖时只读数据库；冷启动或缺口只补缺失范围。
+- `--cache refresh`：强制刷新请求范围，用于复权修订或手工修复。
+- `--cache off`：仅访问 Alpaca，用于无缓存基线和故障排查。
+- `--input`：强制离线，只读输入 artifact，不访问数据库或网络；在线开关不能越过此边界。
+
+盘前、周末和节假日优先读取 latest snapshot，缺失时由最近 final bar 合成；盘中只刷新 snapshot/live 日 K，评分仍只读上一完成 session。收盘宽限期结束后，下一次 bars 请求补齐 final bar 并清除对应 live row。
+
+```bash
+# 查看/校验缓存（只读）
+python3 scripts/cache_admin.py status
+python3 scripts/cache_admin.py integrity-check
+
+# 预热或强制刷新
+python3 scripts/cache_admin.py warm --symbols AAPL,SPY,QQQ
+python3 scripts/cache_admin.py refresh --symbols AAPL,SPY,QQQ --start 2025-01-01
+
+# 清理必须显式指定 symbol、日期范围或 --all
+python3 scripts/cache_admin.py purge --symbols AAPL --start 2026-07-01 --end 2026-07-10
+```
+
 ## 输出示例
 
 ![单股分析输出：K 线图与书面交易决策](docs/demo-output.svg)
@@ -62,7 +86,8 @@ flowchart LR
     classDef result fill:#E8F7EE,stroke:#2F855A,color:#173D2A,stroke-width:1.5px;
 
     subgraph DATA["数据采集"]
-        A["Alpaca 已完成日线<br/>个股 + SPY + QQQ"]
+        A["SQLite 已完成日线<br/>个股 + SPY + QQQ"]
+        H["Alpaca 行情<br/>仅冷启动、缺口或刷新"]
         S["当日 Snapshot<br/>只用于补充展示"]
         P["Alpaca 账户与持仓<br/>只读"]
         N["新闻 / Finnhub<br/>事件与财报风险"]
@@ -86,7 +111,7 @@ flowchart LR
     F["最终结论与交易计划"]
     G["K 线图 + 书面决策"]
 
-    A --> B
+    H --> A --> B
     N --> R --> F
     P --> O --> F
     E --> F
@@ -96,7 +121,7 @@ flowchart LR
     Q --> G
     S --> G
 
-    class A,S,P,N,X source;
+    class A,H,S,P,N,X source;
     class B,C,D,E engine;
     class R,O,Q overlay;
     class F,G result;
@@ -139,7 +164,7 @@ flowchart LR
 
 | 能力                     | 来源或配置                               | 是否必需 | 对结论的影响                      |
 | ------------------------ | ---------------------------------------- | -------: | --------------------------------- |
-| 日线、基准和当日行情     | Alpaca CLI                               |       是 | 日线进入评分；Snapshot 只补充展示 |
+| 日线、基准和当日行情     | 本地 SQLite + Alpaca CLI                 |       是 | final 日线进入评分；live/Snapshot 只补充展示 |
 | 账户与持仓               | Alpaca 只读接口                          |       否 | 调整持仓和仓位建议，不改排名分    |
 | 公司新闻、资料和财报日历 | `FINNHUB_API_KEY`                        |       否 | 只识别降级风险                    |
 | AI 第二意见              | `ANTHROPIC_API_KEY` + `anthropic` SDK    |       否 | 只展示对照，不改结论              |

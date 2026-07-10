@@ -318,7 +318,14 @@ def _snapshot_context_from_args(args, symbols):
         return None
     if args.snapshot == "off":
         return None
-    ctx = fetch_snapshots(symbols, feed=args.feed, timeout=args.timeout)
+    ctx = fetch_snapshots(
+        symbols,
+        feed=args.feed,
+        timeout=args.timeout,
+        adjustment=getattr(args, "adjustment", "split"),
+        cache_mode=getattr(args, "cache", "auto"),
+        cache_db=getattr(args, "cache_db", None),
+    )
     if args.snapshot == "on" and ctx.get("status") != "ok":
         raise RuntimeError(ctx.get("reason") or f"snapshot 读取失败: {ctx.get('status')}")
     return ctx
@@ -333,6 +340,14 @@ def main():
     p.add_argument("--adjustment", default="split")
     p.add_argument("--limit", type=int, default=10000)
     p.add_argument("--timeout", type=int, default=30)
+    p.add_argument(
+        "--cache", choices=("auto", "refresh", "off"), default="auto",
+        help="历史日线缓存：auto=读穿 SQLite，refresh=强制刷新，off=仅远端",
+    )
+    p.add_argument(
+        "--cache-db",
+        help="SQLite 文件路径；默认 skill 根目录 data/market-data.sqlite3",
+    )
     p.add_argument("--input", help="离线模式：从文件或 '-'(stdin) 读 multi-bars JSON，不调用网络")
     p.add_argument("--llm-context-file", help="新闻面风控 overlay JSON；只降级不加分")
     p.add_argument(
@@ -415,7 +430,8 @@ def main():
             ),
             lambda: fetch_bars(
                 symbols, start, end, args.feed,
-                args.adjustment, args.limit, args.timeout),
+                args.adjustment, args.limit, args.timeout,
+                cache_mode=args.cache, cache_db=args.cache_db),
         )
         effective_llm_context = merge_llm_contexts(
             llm_context, llm_context_from_finnhub(finnhub_context)

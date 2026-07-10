@@ -30,6 +30,7 @@ description: "Evaluate whether a US stock is worth buying, holding, reducing, av
 - 新闻检索能力不可用：新闻面写"无法确认"，价量评分照常执行。
 - Finnhub 无 key 或限流：自动跳过，不影响评分。
 - AI 意见无 `ANTHROPIC_API_KEY`、未装 `anthropic` SDK 或调用失败：自动跳过，结论段写"AI 意见: 无法确认"。
+- SQLite 缓存异常：先运行 `python3 "$SKILL_DIR/scripts/cache_admin.py" integrity-check`；在线评分可用 `--cache off` 建立无缓存对照。
 
 ## 数据流程（单股评分）
 
@@ -53,7 +54,9 @@ python3 "$SKILL_DIR/scripts/indicators.py" \
 
 `--start/--end` 默认省略，脚本取约两年已完成日线并计算所有指标、相对强度、市场 regime 和 `score`。多标的一次命令带全部 ticker（外加 SPY,QQQ），逐只输出结论。结果落盘为 `result.json`，供读取评分和下一步画图共用。
 
-脚本内部已对 `bars`、`account/positions`、`finnhub`、`snapshot` 四段网络采集并行（Finnhub 内部再按 symbol 并行），各段独立失败降级、不阻断核心评分。**不要**在脚本外重复拉 snapshot，也不要为提速手动并行或拆 sub-agent——脚本单进程线程池已是最快路径。只有脚本输出的 snapshot 缺失或可疑时，才用 `alpaca data multi-snapshots --symbols {TICKER},SPY,QQQ --feed "$FEED" --quiet` 人工核对。
+脚本内部并行取得 `bars`、`account/positions`、`finnhub` 和 `snapshot`（Finnhub 内部再按 symbol 并行），各段独立失败降级、不阻断核心评分。bars/snapshot 默认先经过 skill 根目录 `data/market-data.sqlite3`：完整 warm 覆盖不联网，冷启动、缺口、盘中 snapshot 或显式 refresh 才调用 Alpaca。**不要**直接查询 SQLite、在脚本外重复拉 snapshot，或为提速手动并行；统一使用脚本门面，避免 live/final 混用。
+
+缓存规则是低自由度约束：保持 `--cache auto` 默认；仅在用户要求刷新、复权数据疑似修订时使用 `refresh`，仅在故障对照时使用 `off`。设置 `WORTH_BUY_STOCKS_DB` 或 `--cache-db` 可覆盖数据库路径。`--input` 是硬离线边界：只允许读取 bars 和显式 context 文件，`on` 类在线开关也不得触网或读写 DB。
 
 可选 flag（按需追加）：
 
@@ -63,9 +66,11 @@ python3 "$SKILL_DIR/scripts/indicators.py" \
 | `--account-context auto\|on\|off` | `auto` | 只读账户/持仓生成敞口 overlay |
 | `--finnhub-context auto\|on\|off` | `auto` | 有 `FINNHUB_API_KEY` 时读 Finnhub 补充；无 key 不触网 |
 | `--llm-context-file path` | 无 | 新闻面风控 JSON，只降级不加分 |
-| `--ai-opinion auto\|on\|off` | `auto` | 有 `ANTHROPIC_API_KEY` 时生成 AI 意见对照；只展示不评分；无 key 不触网；离线 `--input` 下除非 `on` 不触网 |
+| `--ai-opinion auto\|on\|off` | `auto` | 有 `ANTHROPIC_API_KEY` 时生成 AI 意见对照；只展示不评分；无 key 不触网 |
+| `--cache auto\|refresh\|off` | `auto` | final 日线与 snapshot 的 SQLite 读穿策略；盘中 live 不进入评分 |
+| `--cache-db path` | `data/market-data.sqlite3` | 覆盖本次运行的数据库路径；环境变量 `WORTH_BUY_STOCKS_DB` 也可覆盖 |
 | `--account-context-file` / `--finnhub-context-file` / `--snapshot-context-file` / `--ai-opinion-context-file` | 无 | 离线复盘：喂对应 overlay JSON |
-| `--input -` | 无 | 离线模式：从 stdin 读 multi-bars JSON，不触网 |
+| `--input -` | 无 | 硬离线模式：从 stdin 读 multi-bars JSON，不触网、不读写 DB |
 
 3. K 线图（默认执行）：评分完成后，对每个非基准标的画带计划价位线的终端 K 线，放在最终回复 `结论` 段上方展示：
 
@@ -102,7 +107,8 @@ python3 "$SKILL_DIR/scripts/scanner.py" --feed "$FEED" --adjustment split --top 
 | `--min-price` / `--min-volume` | `5` / `50000` | 流动性初筛阈值（IEX 量约为全市场 2-3%） |
 | `--top` | `20` | 候选列表上限 |
 | `--symbols` / `--symbols-file` | 无 | 覆盖股池（跳过 asset list，用于复盘） |
-| `--input` | 无 | 离线复盘：读预取 JSON，不触网 |
+| `--cache auto\|refresh\|off` / `--cache-db` | `auto` / 默认路径 | scanner chunk 共享同一 SQLite；warm 盘前/休市的 bars 与 snapshot 均零网络 |
+| `--input` | 无 | 硬离线复盘：读预取 JSON，不触网、不读写 DB、忽略在线 AI/通知开关 |
 | `--notify on` | `off` | 把摘要推 Telegram |
 
 新闻复核这步必须做（默认 auto 已开）：漏掉会高估可买数量。扫描结果汇报仍遵循"输出格式"7 段，对每只候选单独展开；扫描模式候选数多，不默认逐只画 K 线，用户点名某只候选深入时再按单股流程补图。

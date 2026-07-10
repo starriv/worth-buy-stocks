@@ -51,26 +51,26 @@ class TestFetchSnapshots(unittest.TestCase):
     def test_ok_normalizes_all_symbols_and_uppercases(self):
         raw = {"AAPL": _snap_raw(), "SPY": _snap_raw()}
         with patch("fetching._run_json", return_value=raw):
-            ctx = F.fetch_snapshots(["aapl", "spy"], feed="iex")
+            ctx = F.fetch_snapshots(["aapl", "spy"], feed="iex", cache_mode="off")
         self.assertEqual(ctx["status"], "ok")
         self.assertEqual(list(ctx["symbols"].keys()), ["AAPL", "SPY"])  # 保序去重
         self.assertTrue(ctx["as_of"].endswith("Z"))
 
     def test_empty_symbols_is_unavailable(self):
         with patch("fetching._run_json") as run:
-            ctx = F.fetch_snapshots([], feed="iex")
+            ctx = F.fetch_snapshots([], feed="iex", cache_mode="off")
         self.assertEqual(ctx["status"], "unavailable")
         run.assert_not_called()
 
     def test_run_json_failure_is_unavailable(self):
         with patch("fetching._run_json", side_effect=RuntimeError("boom")):
-            ctx = F.fetch_snapshots(["AAPL"], feed="iex")
+            ctx = F.fetch_snapshots(["AAPL"], feed="iex", cache_mode="off")
         self.assertEqual(ctx["status"], "unavailable")
         self.assertIn("boom", ctx["reason"])
 
     def test_empty_payload_is_unavailable(self):
         with patch("fetching._run_json", return_value={}):
-            ctx = F.fetch_snapshots(["AAPL"], feed="iex")
+            ctx = F.fetch_snapshots(["AAPL"], feed="iex", cache_mode="off")
         self.assertEqual(ctx["status"], "unavailable")
 
 
@@ -144,6 +144,23 @@ class TestIndicatorsSnapshotLoader(unittest.TestCase):
         with patch("indicators.fetch_snapshots") as fetch:
             self.assertIsNone(I._snapshot_context_from_args(args, ["AAPL"]))
         fetch.assert_not_called()
+
+    def test_snapshot_threads_cache_controls(self):
+        from types import SimpleNamespace
+        args = SimpleNamespace(
+            snapshot_context_file=None, snapshot="auto", input=None,
+            feed="iex", adjustment="raw", timeout=30,
+            cache="refresh", cache_db="/tmp/snapshot.sqlite3",
+        )
+        with patch(
+            "indicators.fetch_snapshots",
+            return_value={"status": "unavailable", "reason": "none"},
+        ) as fetch:
+            I._snapshot_context_from_args(args, ["AAPL"])
+        fetch.assert_called_once_with(
+            ["AAPL"], feed="iex", timeout=30, adjustment="raw",
+            cache_mode="refresh", cache_db="/tmp/snapshot.sqlite3",
+        )
 
 
 class TestBuildResultSnapshots(unittest.TestCase):
