@@ -42,7 +42,7 @@ FEED="iex"
 
 首次运行先确认 Python 3.10+ 并安装强制依赖：`python3 -m pip install -r "$SKILL_DIR/requirements.txt"`。所有脚本保持 stdout 为结果/图表通道，运行日志只写 stderr；stderr 被捕获或重定向时默认是 JSONL，可用 `--log-format console|json` 和 `--log-level DEBUG|INFO|WARNING|ERROR` 覆盖。
 
-从 skill 根目录进行人工运维时，先用 `make help` 查看统一入口；常用 target 包括 `analyze`、`scan`、`status`、`sync-assets`、`warm-market-plan`、`reconcile-plan`、回测研究与 `check`。全部回测 Python 命令统一走 `scripts/backtest.py`（`factor-ic`、`score`、`robustness`、`single`、`render`）；Makefile 只做薄转发，保持 stdout、限速和退出码契约。高级子命令参数通过 `ARGS` 传入，全局日志参数通过 `GLOBAL_ARGS` 传入。完整预热和 reconcile target 不得由默认目标或收尾流程自动调用。
+从 skill 根目录进行人工运维时，先用 `make help` 查看统一入口；常用 target 包括 `analyze`、`scan`、`status`、`sync-assets`、`warm-market-plan`、`reconcile-plan`、回测研究与 `check`。全部回测 Python 命令统一走 `scripts/backtest.py`（`factor-ic`、`score`、`robustness`、`single`、`render`、`lifecycle-validate`、`index-lifecycle-validate`）；Makefile 只做薄转发，保持 stdout、限速和退出码契约。高级子命令参数通过 `ARGS` 传入，全局日志参数通过 `GLOBAL_ARGS` 传入。完整预热和 reconcile target 不得由默认目标或收尾流程自动调用。
 
 1. 默认检索最近 30 天新闻/公告/监管披露：只取公司 IR、SEC、交易所公告和主流财经媒体中能影响交易纪律的 3-5 条（保留标题、日期、链接），不做新闻综述。社交媒体、无来源传闻、模型记忆、分析师目标价不能作为降级依据。整理成 `news_context.json`（形状见 `references/agent-contracts.md`）。
 
@@ -111,7 +111,7 @@ python3 "$SKILL_DIR/scripts/backtest.py" single \
 
 回测只验证历史价量主链路：不历史回填账户、新闻、Finnhub、Snapshot 或 AI opinion，不调参、不下单。固定 21/63 日场景是标准化研究窗口；managed 场景按日线近似执行建议仓位、初始止损、1R 保本、移动止损与收盘信号的下一开盘退出（不执行静态止盈）。需要重渲染时使用 `backtest.py render --artifact <json> --html <path>`，不得在页面里重新计算指标。
 
-contract 1.4 artifact 还会保留一个明确标为“已拒绝”的 stateful 实验场景，用于审计恢复/重新入场假设。该实验未通过 16 标的 holdout，不得作为正式策略结论或替代 managed 基线。
+contract 1.4 artifact 还会保留一个明确标为“已拒绝”的 stateful 实验场景，用于审计恢复/重新入场假设。该实验先未通过 16 标的 holdout，随后在排除 QQQ/SPY 的 15 个独立宽基/行业 ETF 分层 holdout 中也只有 13.33% 改善；不得作为正式策略结论、ETF 专用规则或 managed 基线替代品。同一 holdout 不得用于调参。
 
 可选 flag（按需追加）：
 
@@ -167,6 +167,16 @@ python3 "$SKILL_DIR/scripts/scanner.py" --feed "$FEED" --adjustment split --top 
 | `--notify on` | `off` | 把摘要推 Telegram |
 
 新闻复核这步必须做（默认 auto 已开）：漏掉会高估可买数量。扫描结果汇报仍遵循"输出格式"7 段，对每只候选单独展开；扫描模式候选数多，不默认逐只画 K 线，用户点名某只候选深入时再按单股流程补图。
+
+## 轮动组合名单
+
+用户问"轮动组合现在该持有什么/调仓名单"时，用一条命令输出研究晋升配置（63 交易日调仓、Top-20 等权、SPY 跌破 200 日线全现金）的当日目标名单：
+
+```bash
+python3 "$SKILL_DIR/scripts/rotation_list.py" --top 20 --holdings holdings.json
+```
+
+`--holdings`（可选）传当前持仓 JSON（symbol 列表或 {symbol: weight}），输出会附买入/卖出/保留差异。名单是分析结论不是订单；票池为 148 只冻结研究 universe，评分与排名完全来自生产脚本。该配置经预注册 dev/holdout 双门槛验证（holdout 净收益与回撤均优于 QQQ），历史证据与限制以 `artifacts/backtests/rotation-study-*.json` 为准：universe 有残余幸存者偏差、holdout 期较短，向用户说明结论时不得省略。单票深入仍走"数据流程"。
 
 ## 新闻面风控
 

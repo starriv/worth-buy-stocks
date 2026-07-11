@@ -211,6 +211,11 @@ class BacktestCliTests(unittest.TestCase):
             check=False,
         )
 
+    def test_help_exposes_index_etf_validation_without_compatibility_entrypoint(self):
+        result = self.run_cli("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("index-lifecycle-validate", result.stdout)
+
     def test_input_mode_generates_json_and_html_then_rerenders(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "bars.json"

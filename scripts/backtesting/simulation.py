@@ -9,6 +9,7 @@ Two exit families share the same next-open entry rule:
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import math
 import statistics as py_stats
@@ -21,6 +22,30 @@ POLICIES = ("rank_only", "disciplined_verdict")
 MANAGED_TRAIL_FALLBACK_PCT = 8.0
 STATEFUL_RECOVERY_SESSIONS = 63
 STATEFUL_LIFECYCLE_STATUS = "stateful_experimental_rejected"
+
+
+@dataclasses.dataclass(frozen=True)
+class ManagedVariant:
+    """Research-only ablation knobs for the managed simulation.
+
+    All fields default to baseline behaviour; the frozen managed baseline is
+    the run with ``variant=None``. Recovery-reversal entries keep their capped
+    trial allocation even under an allocation override, preserving the
+    independent-recovery discipline.
+    """
+
+    name: str
+    ignored_exit_classes: frozenset[str] = frozenset()
+    excluded_entry_timings: frozenset[str] = frozenset()
+    allocation_override_pct: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.name.replace("_", "").isalnum():
+            raise ValueError("variant name must be a non-empty slug")
+        if self.allocation_override_pct is not None and not (
+            0 < float(self.allocation_override_pct) <= 100
+        ):
+            raise ValueError("allocation_override_pct must be in (0, 100]")
 
 
 def _round(value: float | None, digits: int = 6) -> float | None:
@@ -386,6 +411,7 @@ def _simulate_managed_scenario(
     policy: str,
     cost_bps: float,
     stateful: bool,
+    variant: ManagedVariant | None = None,
 ) -> dict[str, Any]:
     """Next-open entry, exit by the signal's own trade plan.
 
@@ -399,6 +425,8 @@ def _simulate_managed_scenario(
         raise ValueError(f"policy must be one of {', '.join(POLICIES)}")
     if cost_bps < 0:
         raise ValueError("cost_bps must be >= 0")
+    if variant is not None and stateful:
+        raise ValueError("variant ablations only apply to the non-stateful managed path")
     symbol = str(replay["symbol"])
     calendar = list(replay.get("calendar") or [])
     if not calendar:
@@ -712,7 +740,9 @@ def _simulate_managed_scenario(
             exit_signal = record.get("position_exit") or {}
             exit_class = exit_signal.get("classification")
             can_exit = exit_signal.get("action") == "exit_next_open"
-            if stateful and exit_class == "trend_break":
+            if variant is not None and exit_class in variant.ignored_exit_classes:
+                can_exit = False
+            elif stateful and exit_class == "trend_break":
                 can_exit = False
                 if previous_exit_class != "trend_break":
                     _transition(
@@ -784,7 +814,20 @@ def _simulate_managed_scenario(
                         "reason": "plan_exit_unavailable",
                         "policy": policy,
                     })
+                elif variant is not None and plan["entry_timing"] in variant.excluded_entry_timings:
+                    skipped.append({
+                        "signal_date": date,
+                        "reason": "entry_timing_filtered",
+                        "policy": policy,
+                    })
                 else:
+                    if (
+                        variant is not None
+                        and variant.allocation_override_pct is not None
+                        and plan["entry_timing"] != "recovery_reversal"
+                    ):
+                        plan = dict(plan)
+                        plan["allocation_pct"] = float(variant.allocation_override_pct)
                     entry_kind = "reentry" if stateful and recovery_watch is not None else "initial"
                     watch_snapshot = dict(recovery_watch) if recovery_watch is not None else None
                     if entry_kind == "reentry":
@@ -873,7 +916,12 @@ def _simulate_managed_scenario(
                 "max_target_allocation_pct": _round(position["target_allocation_pct"], 2),
             })
         trades.append(trade)
-    scenario_name = f"{policy}_stateful" if stateful else f"{policy}_managed"
+    if stateful:
+        scenario_name = f"{policy}_stateful"
+    elif variant is not None:
+        scenario_name = f"{policy}_managed_{variant.name}"
+    else:
+        scenario_name = f"{policy}_managed"
     return _assemble_scenario(
         scenario=scenario_name, policy=policy, horizon=None,
         cost_bps=cost_bps, trades=trades, skipped=skipped, curve=curve,
@@ -894,6 +942,22 @@ def simulate_managed_scenario(
 
     return _simulate_managed_scenario(
         replay, bars, policy=policy, cost_bps=cost_bps, stateful=False
+    )
+
+
+def simulate_managed_variant(
+    replay: Mapping[str, Any],
+    bars: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    policy: str = "disciplined_verdict",
+    cost_bps: float,
+    variant: ManagedVariant,
+) -> dict[str, Any]:
+    """Run a research-only managed ablation on top of an existing replay."""
+
+    return _simulate_managed_scenario(
+        replay, bars, policy=policy, cost_bps=cost_bps, stateful=False,
+        variant=variant,
     )
 
 

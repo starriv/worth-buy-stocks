@@ -20,6 +20,9 @@ from backtesting.lifecycle_validation import (  # noqa: E402
     run_validation as run_lifecycle_validation,
     write_validation_report,
 )
+from backtesting.index_lifecycle_validation import (  # noqa: E402
+    run_validation as run_index_lifecycle_validation,
+)
 from skill_logging import (  # noqa: E402
     add_logging_arguments,
     bind_log_context,
@@ -105,6 +108,50 @@ def _parser() -> argparse.ArgumentParser:
     lifecycle.add_argument(
         "--output",
         default="artifacts/backtests/stateful-lifecycle-holdout-2025-04-04-2026-07-09.json",
+    )
+
+    ablation = sub.add_parser(
+        "managed-ablation",
+        help="运行 research-only managed 出入场/仓位消融（共享单次 replay）",
+    )
+    ablation.add_argument("--symbols", required=True, help="逗号分隔标的列表")
+    ablation.add_argument("--start", required=True)
+    ablation.add_argument("--end", required=True)
+    ablation.add_argument("--cost-bps", type=float, default=10.0)
+    ablation.add_argument("--cache-db")
+    ablation.add_argument("--output", default="auto", help="auto 或 JSON 输出路径")
+
+    signal_ablation = sub.add_parser(
+        "signal-ablation",
+        help="运行 research-only 信号层消融（时间线后处理，执行层冻结）",
+    )
+    signal_ablation.add_argument("--symbols", required=True, help="逗号分隔标的列表")
+    signal_ablation.add_argument("--start", required=True)
+    signal_ablation.add_argument("--end", required=True)
+    signal_ablation.add_argument("--cost-bps", type=float, default=10.0)
+    signal_ablation.add_argument("--cache-db")
+    signal_ablation.add_argument("--output", default="auto", help="auto 或 JSON 输出路径")
+
+    rotation = sub.add_parser(
+        "rotation-study",
+        help="运行 research-only 横截面 Top-N 轮动组合研究（预注册配置矩阵）",
+    )
+    rotation.add_argument("--feed", choices=("iex",), default="iex")
+    rotation.add_argument("--adjustment", choices=("split",), default="split")
+    rotation.add_argument("--timeout", type=int, default=60)
+    rotation.add_argument("--cache", choices=("auto", "refresh", "off"), default="auto")
+    rotation.add_argument("--cache-db")
+    rotation.add_argument("--cost-bps", type=float, default=10.0)
+    rotation.add_argument("--output", default="auto", help="auto 或 JSON 输出路径")
+
+    index_lifecycle = sub.add_parser(
+        "index-lifecycle-validate",
+        help="运行预注册指数 ETF stateful 分层 cache-only holdout",
+    )
+    index_lifecycle.add_argument("--cache-db")
+    index_lifecycle.add_argument(
+        "--output",
+        default="artifacts/backtests/index-etf-lifecycle-holdout-2025-04-04-2026-07-09.json",
     )
 
     research_help = {
@@ -267,6 +314,179 @@ def _lifecycle_validate(args: argparse.Namespace) -> int:
         return EXIT_INTERNAL
 
 
+def _managed_ablation(args: argparse.Namespace) -> int:
+    from backtesting.managed_ablation import run_ablation, write_validation_report
+
+    symbols = [item.strip().upper() for item in str(args.symbols).split(",") if item.strip()]
+    if not symbols or args.cost_bps < 0:
+        _json_stdout({
+            "error": "argument_invalid",
+            "message": "symbols 非空且 cost-bps >= 0",
+        })
+        return EXIT_ARGUMENT
+    bind_log_context(command="backtest_managed_ablation", data_source="cache-only")
+    try:
+        report = run_ablation(
+            symbols, args.start, args.end,
+            cost_bps=float(args.cost_bps), cache_db=args.cache_db,
+        )
+        if args.output == "auto":
+            target = Path("artifacts/backtests") / (
+                f"managed-ablation-{args.start}-{args.end}-{report['semantic_hash'][:10]}.json"
+            )
+        else:
+            target = Path(args.output)
+        path = write_validation_report(target, report)
+        _json_stdout({
+            "status": "ok",
+            "lifecycle": report["lifecycle"],
+            "semantic_hash": report["semantic_hash"],
+            "symbols_ok": sum(row["status"] == "ok" for row in report["per_symbol"]),
+            "output": str(path),
+        })
+        logger.info(
+            "managed_ablation_completed",
+            semantic_hash=report["semantic_hash"],
+            output_path=str(path),
+        )
+        return 0
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("managed_ablation_invalid", reason=str(exc))
+        _json_stdout({"error": "ablation_invalid", "message": str(exc)})
+        return EXIT_DATA
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        logger.exception("managed_ablation_failed", reason=str(exc))
+        _json_stdout({"error": "ablation_failed", "message": str(exc)})
+        return EXIT_INTERNAL
+
+
+def _signal_ablation(args: argparse.Namespace) -> int:
+    from backtesting.managed_ablation import run_signal_ablation, write_validation_report
+
+    symbols = [item.strip().upper() for item in str(args.symbols).split(",") if item.strip()]
+    if not symbols or args.cost_bps < 0:
+        _json_stdout({
+            "error": "argument_invalid",
+            "message": "symbols 非空且 cost-bps >= 0",
+        })
+        return EXIT_ARGUMENT
+    bind_log_context(command="backtest_signal_ablation", data_source="cache-only")
+    try:
+        report = run_signal_ablation(
+            symbols, args.start, args.end,
+            cost_bps=float(args.cost_bps), cache_db=args.cache_db,
+        )
+        if args.output == "auto":
+            target = Path("artifacts/backtests") / (
+                f"signal-ablation-{args.start}-{args.end}-{report['semantic_hash'][:10]}.json"
+            )
+        else:
+            target = Path(args.output)
+        path = write_validation_report(target, report)
+        _json_stdout({
+            "status": "ok",
+            "lifecycle": report["lifecycle"],
+            "semantic_hash": report["semantic_hash"],
+            "symbols_ok": sum(row["status"] == "ok" for row in report["per_symbol"]),
+            "output": str(path),
+        })
+        logger.info(
+            "signal_ablation_completed",
+            semantic_hash=report["semantic_hash"],
+            output_path=str(path),
+        )
+        return 0
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("signal_ablation_invalid", reason=str(exc))
+        _json_stdout({"error": "ablation_invalid", "message": str(exc)})
+        return EXIT_DATA
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        logger.exception("signal_ablation_failed", reason=str(exc))
+        _json_stdout({"error": "ablation_failed", "message": str(exc)})
+        return EXIT_INTERNAL
+
+
+def _rotation_study(args: argparse.Namespace) -> int:
+    from backtesting.rotation import run_rotation_study, write_validation_report
+
+    if args.cost_bps < 0 or args.timeout < 1:
+        _json_stdout({
+            "error": "argument_invalid",
+            "message": "cost-bps >= 0 且 timeout >= 1",
+        })
+        return EXIT_ARGUMENT
+    bind_log_context(command="backtest_rotation_study", feed=args.feed)
+    try:
+        report = run_rotation_study(
+            feed=args.feed, adjustment=args.adjustment, timeout=args.timeout,
+            cache_mode=args.cache, cache_db=args.cache_db,
+            cost_bps=float(args.cost_bps),
+        )
+        if args.output == "auto":
+            target = Path("artifacts/backtests") / (
+                f"rotation-study-{report['semantic_hash'][:10]}.json"
+            )
+        else:
+            target = Path(args.output)
+        path = write_validation_report(target, report)
+        _json_stdout({
+            "status": "ok",
+            "lifecycle": report["lifecycle"],
+            "winner": report["selection"]["winner"],
+            "decision": report["selection"]["decision"],
+            "semantic_hash": report["semantic_hash"],
+            "output": str(path),
+        })
+        logger.info(
+            "rotation_study_completed",
+            winner=report["selection"]["winner"],
+            decision=report["selection"]["decision"],
+            semantic_hash=report["semantic_hash"],
+            output_path=str(path),
+        )
+        return 0
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("rotation_study_invalid", reason=str(exc))
+        _json_stdout({"error": "rotation_invalid", "message": str(exc)})
+        return EXIT_DATA
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        logger.exception("rotation_study_failed", reason=str(exc))
+        _json_stdout({"error": "rotation_failed", "message": str(exc)})
+        return EXIT_INTERNAL
+
+
+def _index_lifecycle_validate(args: argparse.Namespace) -> int:
+    bind_log_context(command="backtest_index_lifecycle_validate", data_source="cache-only")
+    try:
+        report = run_index_lifecycle_validation(cache_db=args.cache_db)
+        path = write_validation_report(args.output, report)
+        _json_stdout({
+            "status": "ok",
+            "decision": report["summary"]["decision"],
+            "semantic_hash": report["semantic_hash"],
+            "valid_symbols": report["summary"]["valid_symbols"],
+            "broad_valid_symbols": report["summary"]["broad_valid_symbols"],
+            "sector_valid_symbols": report["summary"]["sector_valid_symbols"],
+            "output": str(path),
+        })
+        logger.info(
+            "index_etf_lifecycle_validation_completed",
+            decision=report["summary"]["decision"],
+            valid_symbols=report["summary"]["valid_symbols"],
+            semantic_hash=report["semantic_hash"],
+            output_path=str(path),
+        )
+        return 0
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("index_etf_lifecycle_validation_invalid", reason=str(exc))
+        _json_stdout({"error": "validation_invalid", "message": str(exc)})
+        return EXIT_DATA
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        logger.exception("index_etf_lifecycle_validation_failed", reason=str(exc))
+        _json_stdout({"error": "validation_failed", "message": str(exc)})
+        return EXIT_INTERNAL
+
+
 def _research(args: argparse.Namespace) -> int:
     event, runner = RESEARCH_COMMANDS[args.command]
     if args.timeout < 1:
@@ -301,6 +521,14 @@ def main() -> int:
         return _render(args)
     if args.command == "lifecycle-validate":
         return _lifecycle_validate(args)
+    if args.command == "managed-ablation":
+        return _managed_ablation(args)
+    if args.command == "rotation-study":
+        return _rotation_study(args)
+    if args.command == "signal-ablation":
+        return _signal_ablation(args)
+    if args.command == "index-lifecycle-validate":
+        return _index_lifecycle_validate(args)
     return _research(args)
 
 

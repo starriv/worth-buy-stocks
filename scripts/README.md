@@ -245,6 +245,10 @@ AI 意见载荷采用字段白名单，输入中不含 `verdict`、`composite` �
 | `backtest.py robustness` | 检查结果稳定性 | 非重叠窗口、regime / 行业中性拆分、bootstrap CI、幸存者探针 |
 | `backtest.py single` | 检查单标的历史时序证据 | point-in-time 评分、21/63 日研究窗口、计划仓位 managed 持仓保护、自包含 HTML |
 | `backtest.py render` | 重建可视化报告 | 校验 canonical artifact 后只做展示，不重算研究指标 |
+| `backtest.py managed-ablation` | research-only 执行层消融 | 共享单次 replay 跑 managed 基线 + 出场/入场时机/仓位变体，冻结 holdout 门槛评审 |
+| `backtest.py signal-ablation` | research-only 信号层消融 | 时间线后处理改写 verdict（过热梯度、确认放宽、相对强度门槛），执行层冻结 |
+| `backtest.py rotation-study` | 横截面 Top-N 轮动组合研究 | 预注册配置矩阵、dev 选优 + holdout 双门槛（收益/回撤 vs QQQ）、日频权益与成本 |
+| `rotation_list.py` | 轮动策略当日名单 | 用晋升配置（63 日调仓 Top-20 等权 + SPY 200 日线 regime）输出目标名单与持仓 diff |
 | `forward_log.py` | 积累样本外记录 | 固化当日评分，满 63 个交易日后按结论和时机分类对账 |
 
 使用 Spearman 是因为评分关注排序，且秩相关不易被单只股票的极端收益主导。采用截面 IC 是为了减少市场整体涨跌对结果的干扰。
@@ -290,10 +294,15 @@ AI 意见载荷采用字段白名单，输入中不含 `verdict`、`composite` �
 | `backtesting/replay.py` | point-in-time 生产评分回放与结构化 timeline |
 | `backtesting/event_study.py` / `statistics.py` | 21/63 日事件研究、非重叠推断、IC 与循环块 bootstrap CI |
 | `backtesting/simulation.py` | 下一开盘、固定研究窗口、managed 基线及 stateful 恢复/再入场实验、成本、账本、权益、回撤和基准 |
+| `backtesting/lifecycle_validation.py` | 预注册 16 标的 stateful holdout、联合门槛和确定性报告 |
+| `backtesting/managed_ablation.py` | research-only 执行层与信号层消融 runner、冻结变体网格与门槛复用 |
+| `backtesting/rotation.py` | 横截面 Top-N 轮动组合仿真、预注册配置矩阵与 dev/holdout 选优晋升 |
+| `rotation_list.py` | 轮动晋升配置的当日 Top-N 名单、regime 状态与持仓 diff（只分析不交易） |
+| `backtesting/index_lifecycle_validation.py` | 排除 QQQ/SPY 的 4 宽基 + 11 行业 ETF 分层 holdout、fail-closed 门槛和确定性报告 |
 | `backtesting/artifact.py` / `visualization.py` | canonical artifact、语义 hash、原子写入与只读自包含 HTML |
 | `backtesting/panel.py` | 宽票池历史 Panel、前瞻收益与 cache-backed loader |
 | `backtesting/cross_sectional.py` / `universe.py` | 三类宽票池研究循环与冻结票池 |
-| `backtest.py` | 唯一回测 CLI；横截面研究、单标的验证与 artifact 重渲染 |
+| `backtest.py` | 唯一回测 CLI；横截面研究、单标的验证、两类生命周期 holdout 与 artifact 重渲染 |
 | `forward_log.py` | 按模型版本记录和评估前瞻结果 |
 | `skill_logging.py` | structlog 配置、console/JSONL renderer、上下文与凭证脱敏 |
 | `utils.py` | 通用数值归一化工具 |

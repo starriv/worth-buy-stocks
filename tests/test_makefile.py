@@ -31,7 +31,7 @@ class TestMakefileGateway(unittest.TestCase):
         for target in (
             "analyze", "scan", "status", "sync-assets", "warm-market-plan",
             "reconcile-plan", "cache-purge-all", "backtest-factor", "backtest-visual",
-            "backtest-lifecycle-validate", "check",
+            "backtest-lifecycle-validate", "backtest-index-lifecycle-validate", "check",
         ):
             self.assertIn(target, result.stdout)
         for variable in ("START", "END", "DATA_SOURCE", "COST_BPS", "HTML"):
@@ -95,6 +95,16 @@ class TestMakefileGateway(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("scripts/backtest.py", result.stdout)
         self.assertIn("lifecycle-validate", result.stdout)
+        self.assertIn('--cache-db "/tmp/research.sqlite3"', result.stdout)
+
+    def test_index_etf_validation_uses_unified_cache_only_cli(self):
+        result = self.run_make(
+            "-n", "backtest-index-lifecycle-validate",
+            "CACHE_DB=/tmp/research.sqlite3",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("scripts/backtest.py", result.stdout)
+        self.assertIn("index-lifecycle-validate", result.stdout)
         self.assertIn('--cache-db "/tmp/research.sqlite3"', result.stdout)
 
     def test_status_preserves_json_only_stdout_and_missing_db(self):

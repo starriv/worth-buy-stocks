@@ -59,6 +59,8 @@ FORWARD_SYMBOLS_ARG = $(if $(strip $(FORWARD_SYMBOLS)),--symbols "$(FORWARD_SYMB
 	warm-market-plan warm-market reconcile-plan reconcile-market \
 	cache-purge cache-purge-all \
 	backtest-factor backtest-score backtest-robustness backtest-visual backtest-lifecycle-validate \
+	backtest-index-lifecycle-validate \
+	backtest-managed-ablation backtest-signal-ablation backtest-rotation-study rotation-list \
 	forward-record forward-evaluate contract \
 	compile test-unit test validate-skill diff-check check
 
@@ -156,6 +158,30 @@ backtest-visual: ## [研究] 运行单标的事件研究、交易仿真并生成
 
 backtest-lifecycle-validate: ## [研究] 运行预注册 stateful 多标的 cache-only holdout
 	@$(PYTHON) scripts/backtest.py $(GLOBAL_ARGS) lifecycle-validate \
+		--cache-db "$(CACHE_DB)" $(ARGS)
+
+backtest-index-lifecycle-validate: ## [研究] 运行预注册指数 ETF stateful 分层 cache-only holdout
+	@$(PYTHON) scripts/backtest.py $(GLOBAL_ARGS) index-lifecycle-validate \
+		--cache-db "$(CACHE_DB)" $(ARGS)
+
+backtest-managed-ablation: ## [研究] 运行 research-only 执行层消融（SYMBOLS/START/END）
+	@$(PYTHON) scripts/backtest.py $(GLOBAL_ARGS) managed-ablation \
+		--symbols "$(SYMBOLS)" $(START_ARG) $(END_ARG) \
+		--cache-db "$(CACHE_DB)" --cost-bps "$(COST_BPS)" $(ARGS)
+
+backtest-signal-ablation: ## [研究] 运行 research-only 信号层消融（SYMBOLS/START/END）
+	@$(PYTHON) scripts/backtest.py $(GLOBAL_ARGS) signal-ablation \
+		--symbols "$(SYMBOLS)" $(START_ARG) $(END_ARG) \
+		--cache-db "$(CACHE_DB)" --cost-bps "$(COST_BPS)" $(ARGS)
+
+backtest-rotation-study: ## [研究] 运行预注册横截面 Top-N 轮动组合研究
+	@$(PYTHON) scripts/backtest.py $(GLOBAL_ARGS) rotation-study \
+		--feed "$(FEED)" --adjustment "$(ADJUSTMENT)" \
+		--cache-db "$(CACHE_DB)" --cost-bps "$(COST_BPS)" $(ARGS)
+
+rotation-list: ## [运行] 输出轮动晋升配置的当日 Top-N 名单（只分析不交易）
+	@$(PYTHON) scripts/rotation_list.py $(GLOBAL_ARGS) --top "$(TOP)" \
+		--feed "$(FEED)" --adjustment "$(ADJUSTMENT)" \
 		--cache-db "$(CACHE_DB)" $(ARGS)
 
 forward-record: ## [研究] 记录当日前瞻评分，可用 FORWARD_SYMBOLS 覆盖默认篮子

@@ -113,7 +113,9 @@ make backtest-visual SYMBOL=AAPL START=2021-07-01 END=2026-07-09
 
 报告同时展示 21/63 日绝对及相对收益事件研究、非重叠推断样本、rank-only 与 disciplined-verdict 的下一开盘固定研究窗口，以及执行建议仓位、初始止损、1R 保本、移动保护和下一开盘信号退出的 managed 仿真。固定窗口 marker 明确标为研究起点/窗口终点，不代表系统识别高位。HTML 只渲染 canonical artifact，不重算业务指标；历史回测不回填新闻、账户、Snapshot、Finnhub 或 AI opinion。
 
-contract 1.4 另行保留 stateful 实验场景及其恢复/重新入场状态记录。该场景未通过预注册多标的 holdout，报告明确标为“已拒绝”，旧 managed 继续作为正式基线。
+contract 1.4 另行保留 stateful 实验场景及其恢复/重新入场状态记录。该场景未通过预注册的 16 标的 holdout；随后排除 QQQ/SPY、补齐缓存并对 4 个宽基与 11 个行业 ETF 做分层 holdout，收益改善率也只有 13.33%，再次判定 reject。报告明确标为“已拒绝”，旧 managed 继续作为正式基线。
+
+指数 ETF 分层验证统一由 `make backtest-index-lifecycle-validate` 调用。正式报告中 15/15 ETF 有效，仅 IWM、XLI 改善；6 个 ETF 两个场景均无交易，说明现有首次入场评分仍限制指数参与度。对实际触发 stateful 转换的 9 个 ETF，收益差中位数为 −1.4435%、Sharpe 差中位数为 −0.3559、回撤差中位数为 −4.2901 个百分点、换手比中位数为 2.4286。不得据此升级 ETF 专用生命周期，也不得在同一 holdout 上调参。
 
 2021-07-01 至 2026-07-09 的 AAPL v1.1 验收结果为 `inconclusive`：63 日非重叠推断样本 19 个，其中最终结论为“是”的样本仅 1 个，不能据此确认或否定评分有效性。完整口径和证据见 [Model Card](docs/model-card.md) 与[回测契约](docs/backtesting-contract.md)。
 

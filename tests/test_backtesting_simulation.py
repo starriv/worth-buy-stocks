@@ -11,11 +11,13 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from backtesting.simulation import (  # noqa: E402
+    ManagedVariant,
     build_benchmarks,
     run_simulations,
     simulate_managed_scenario,
     simulate_scenario,
     simulate_stateful_managed_scenario,
+    simulate_managed_variant,
 )
 
 
@@ -402,6 +404,151 @@ class ManagedExitTests(unittest.TestCase):
         self.assertEqual(trade["status"], "open")
         self.assertIsNone(trade["exit_date"])
         self.assertEqual(result["metrics"]["open_trade_count"], 1)
+
+
+class ManagedVariantTests(unittest.TestCase):
+    def test_noop_variant_matches_baseline_metrics(self):
+        _, bars, replay = _managed_fixture(
+            [
+                (100, 101, 99, 100),
+                (100, 105, 99, 104),
+                (106, 112, 105, 110),
+                (105, 106, 98, 100),
+            ],
+            stop=94, trail=10,
+        )
+        baseline = simulate_managed_scenario(
+            replay, bars, policy="disciplined_verdict", cost_bps=10
+        )
+        variant = simulate_managed_variant(
+            replay, bars, cost_bps=10, variant=ManagedVariant(name="noop")
+        )
+        self.assertEqual(variant["scenario"], "disciplined_verdict_managed_noop")
+        self.assertEqual(variant["metrics"], baseline["metrics"])
+        self.assertEqual(
+            [trade["exit_reason"] for trade in variant["trades"]],
+            [trade["exit_reason"] for trade in baseline["trades"]],
+        )
+
+    def test_ignored_exit_class_holds_through_overextended_signal(self):
+        dates, bars, replay = _managed_fixture(
+            [
+                (100, 101, 99, 100),
+                (100, 102, 99, 101),
+                (105, 107, 104, 106),
+                (103, 104, 102, 103),
+            ],
+            stop=80, trail=20,
+        )
+        replay["timeline"][2]["position_exit"] = {
+            "action": "exit_next_open",
+            "classification": "overextended_reversal",
+        }
+        result = simulate_managed_variant(
+            replay, bars, cost_bps=0,
+            variant=ManagedVariant(
+                name="hold_through_heat",
+                ignored_exit_classes=frozenset({"overextended_reversal"}),
+            ),
+        )
+        trade = result["trades"][0]
+        self.assertEqual(trade["status"], "open")
+        self.assertIsNone(trade["exit_date"])
+        self.assertEqual(trade["mark_date"], dates[-1])
+
+    def test_ignored_exit_class_keeps_trend_break_exit_live(self):
+        dates, bars, replay = _managed_fixture(
+            [
+                (100, 101, 99, 100),
+                (100, 102, 99, 101),
+                (105, 107, 104, 106),
+                (103, 104, 102, 103),
+            ],
+            stop=80, trail=20,
+        )
+        replay["timeline"][2]["position_exit"] = {
+            "action": "exit_next_open",
+            "classification": "trend_break",
+        }
+        result = simulate_managed_variant(
+            replay, bars, cost_bps=0,
+            variant=ManagedVariant(
+                name="hold_through_heat",
+                ignored_exit_classes=frozenset({"overextended_reversal"}),
+            ),
+        )
+        trade = result["trades"][0]
+        self.assertEqual(trade["exit_date"], dates[3])
+        self.assertEqual(trade["exit_reason"], "signal_trend_break")
+
+    def test_excluded_entry_timing_is_skipped_with_reason(self):
+        _, bars, replay = _managed_fixture(
+            [
+                (100, 101, 99, 100),
+                (100, 102, 99, 101),
+                (101, 103, 100, 102),
+            ],
+            stop=80, trail=20,
+        )
+        replay["timeline"][0]["entry_timing"] = {
+            "classification": "pullback_reversal",
+        }
+        result = simulate_managed_variant(
+            replay, bars, cost_bps=0,
+            variant=ManagedVariant(
+                name="skip_pullback_entry",
+                excluded_entry_timings=frozenset({"pullback_reversal"}),
+            ),
+        )
+        self.assertEqual(result["trades"], [])
+        self.assertTrue(any(
+            row["reason"] == "entry_timing_filtered"
+            for row in result["skipped_signals"]
+        ))
+
+    def test_allocation_override_is_full_but_recovery_stays_capped(self):
+        _, bars, replay = _managed_fixture(
+            [
+                (100, 101, 99, 100),
+                (100, 102, 99, 101),
+                (101, 103, 100, 102),
+            ],
+            stop=80, trail=20,
+        )
+        replay["timeline"][0]["suggested_position_pct"] = 40.0
+        replay["timeline"][0]["entry_timing"] = {
+            "classification": "trend_continuation",
+        }
+        full = simulate_managed_variant(
+            replay, bars, cost_bps=0,
+            variant=ManagedVariant(name="full_allocation", allocation_override_pct=100.0),
+        )
+        self.assertEqual(full["trades"][0]["entry_allocation_pct"], 100.0)
+        replay["timeline"][0]["entry_timing"] = {
+            "classification": "recovery_reversal",
+        }
+        replay["timeline"][0]["suggested_position_pct"] = 15.0
+        capped = simulate_managed_variant(
+            replay, bars, cost_bps=0,
+            variant=ManagedVariant(name="full_allocation", allocation_override_pct=100.0),
+        )
+        self.assertEqual(capped["trades"][0]["entry_allocation_pct"], 15.0)
+
+    def test_variant_rejects_stateful_combination(self):
+        _, bars, replay = _managed_fixture(
+            [
+                (100, 101, 99, 100),
+                (100, 102, 99, 101),
+            ],
+            stop=80, trail=20,
+        )
+        from backtesting.simulation import _simulate_managed_scenario
+
+        with self.assertRaises(ValueError):
+            _simulate_managed_scenario(
+                replay, bars, policy="disciplined_verdict", cost_bps=0,
+                stateful=True, variant=ManagedVariant(name="noop"),
+            )
 
 
 class StatefulLifecycleTests(unittest.TestCase):
