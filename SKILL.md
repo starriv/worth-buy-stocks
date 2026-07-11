@@ -176,7 +176,7 @@ python3 "$SKILL_DIR/scripts/scanner.py" --feed "$FEED" --adjustment split --top 
 python3 "$SKILL_DIR/scripts/rotation_list.py" --top 20 --holdings holdings.json
 ```
 
-`--holdings`（可选）传当前持仓 JSON（symbol 列表或 {symbol: weight}），输出会附买入/卖出/保留差异。名单是分析结论不是订单；票池为 148 只冻结研究 universe，评分与排名完全来自生产脚本。该配置经预注册 dev/holdout 双门槛验证（holdout 净收益与回撤均优于 QQQ），历史证据与限制以 `artifacts/backtests/rotation-study-*.json` 为准：universe 有残余幸存者偏差、holdout 期较短，向用户说明结论时不得省略。单票深入仍走"数据流程"。
+`--holdings`（可选）传当前持仓 JSON（symbol 列表或 {symbol: weight}），输出会附买入/卖出/保留差异。加 `--record` 把本次名单固化为前瞻记录（输出中的调仓到期状态基于上次记录推算，距上次 ≥63 交易日为到期）；`--evaluate` 结算已满 63 交易日的记录，报告等权毛收益与相对 QQQ/SPY 的超额，这是晋升配置持续积累样本外证据的唯一正规通道。名单是分析结论不是订单；票池为 148 只冻结研究 universe，评分与排名完全来自生产脚本。该配置经预注册 dev/holdout 双门槛验证（holdout 净收益与回撤均优于 QQQ），历史证据与限制以 `artifacts/backtests/rotation-study-*.json` 为准：universe 有残余幸存者偏差、holdout 期较短，向用户说明结论时不得省略。单票深入仍走"数据流程"。
 
 ## 新闻面风控
 

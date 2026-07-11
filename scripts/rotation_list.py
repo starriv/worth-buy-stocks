@@ -37,6 +37,9 @@ logger = get_logger("rotation_list")
 DEFAULT_TOP_N = 20
 PROMOTED_CONFIG = "step63_top20"
 REBALANCE_SESSIONS = 63
+DEFAULT_LOG = os.path.join(
+    os.path.dirname(__file__), "..", "data", "rotation_forward_log.jsonl"
+)
 
 
 def build_rotation_list(
@@ -97,6 +100,117 @@ def build_rotation_list(
     return output
 
 
+def load_forward_log(path: str) -> list[dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+def merge_snapshot(
+    records: list[dict[str, Any]], result: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Append the current list as a forward record, deduped by signal date."""
+
+    snapshot = {
+        "signal_date": result["signal_date"],
+        "strategy": result["strategy"],
+        "top_n": result["top_n"],
+        "regime": result["regime"],
+        "members": [
+            {"symbol": row["symbol"], "composite": row["composite"]}
+            for row in result["target"]
+        ],
+        "recorded_at": dt.datetime.now(dt.timezone.utc)
+        .isoformat().replace("+00:00", "Z"),
+    }
+    merged = [row for row in records if row.get("signal_date") != snapshot["signal_date"]]
+    merged.append(snapshot)
+    merged.sort(key=lambda row: str(row.get("signal_date")))
+    return merged
+
+
+def write_forward_log(path: str, records: list[dict[str, Any]]) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        for row in records:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def rebalance_status(
+    records: list[dict[str, Any]], calendar: list[str], as_of: str
+) -> dict[str, Any]:
+    """Sessions elapsed since the last recorded signal and whether a new one is due."""
+
+    recorded = [
+        str(row["signal_date"]) for row in records
+        if str(row.get("signal_date", "")) <= as_of
+    ]
+    if not recorded:
+        return {"last_recorded_signal": None, "sessions_elapsed": None, "due": True}
+    last = max(recorded)
+    index = {date: position for position, date in enumerate(calendar)}
+    if last not in index or as_of not in index:
+        return {"last_recorded_signal": last, "sessions_elapsed": None, "due": True}
+    elapsed = index[as_of] - index[last]
+    return {
+        "last_recorded_signal": last,
+        "sessions_elapsed": elapsed,
+        "due": elapsed >= REBALANCE_SESSIONS,
+    }
+
+
+def evaluate_records(
+    records: list[dict[str, Any]], panel: Any, *, horizon: int = REBALANCE_SESSIONS
+) -> dict[str, Any]:
+    """Settle matured forward records: equal-weight gross return vs QQQ/SPY."""
+
+    index = {date: position for position, date in enumerate(panel.calendar)}
+    matured: list[dict[str, Any]] = []
+    pending = 0
+    for row in records:
+        signal_date = str(row.get("signal_date"))
+        position = index.get(signal_date)
+        if position is None or position + horizon >= len(panel.calendar):
+            pending += 1
+            continue
+        members = [str(item["symbol"]) for item in row.get("members") or []]
+        returns = [
+            value for value in (
+                panel.fwd_return_pct(symbol, position, horizon) for symbol in members
+            )
+            if isinstance(value, (int, float))
+        ]
+        portfolio = sum(returns) / len(returns) if returns else 0.0
+        qqq = panel.fwd_return_pct("QQQ", position, horizon)
+        spy = panel.fwd_return_pct("SPY", position, horizon)
+        matured.append({
+            "signal_date": signal_date,
+            "regime": row.get("regime"),
+            "members": len(members),
+            "portfolio_return_pct": round(portfolio, 4),
+            "qqq_return_pct": round(qqq, 4) if isinstance(qqq, (int, float)) else None,
+            "spy_return_pct": round(spy, 4) if isinstance(spy, (int, float)) else None,
+            "excess_vs_qqq_pct": (
+                round(portfolio - qqq, 4) if isinstance(qqq, (int, float)) else None
+            ),
+        })
+    excesses = [
+        row["excess_vs_qqq_pct"] for row in matured
+        if isinstance(row["excess_vs_qqq_pct"], (int, float))
+    ]
+    return {
+        "report_type": "rotation_forward_evaluation",
+        "horizon_sessions": horizon,
+        "matured": matured,
+        "pending": pending,
+        "mean_excess_vs_qqq_pct": (
+            round(sum(excesses) / len(excesses), 4) if excesses else None
+        ),
+        "note": "毛收益口径（未扣双边 10bps，约 -0.02%/期）；空仓期组合收益按 0 计。",
+    }
+
+
 def _load_holdings(path: str | None) -> dict[str, Any] | None:
     if not path:
         return None
@@ -114,6 +228,9 @@ def main() -> int:
     parser.add_argument("--top", type=int, default=DEFAULT_TOP_N)
     parser.add_argument("--date", help="信号日（默认最近完成交易日）")
     parser.add_argument("--holdings", help="当前持仓 JSON（列表或 {symbol: weight}）")
+    parser.add_argument("--record", action="store_true", help="把本次名单固化为前瞻记录")
+    parser.add_argument("--evaluate", action="store_true", help="结算已满 63 交易日的前瞻记录")
+    parser.add_argument("--log", default=os.path.normpath(DEFAULT_LOG))
     parser.add_argument("--feed", choices=("iex",), default="iex")
     parser.add_argument("--adjustment", choices=("split",), default="split")
     parser.add_argument("--timeout", type=int, default=60)
@@ -133,9 +250,25 @@ def main() -> int:
             args.feed, args.adjustment, args.timeout,
             cache_mode=args.cache, cache_db=args.cache_db,
         )
+        records = load_forward_log(args.log)
+        if args.evaluate:
+            evaluation = evaluate_records(records, panel)
+            print(json.dumps(evaluation, ensure_ascii=False, indent=2))
+            logger.info(
+                "rotation_forward_evaluated",
+                matured=len(evaluation["matured"]),
+                pending=evaluation["pending"],
+            )
+            return 0
         result = build_rotation_list(
             panel, top_n=args.top, signal_date=args.date, holdings=holdings,
         )
+        result["rebalance_status"] = rebalance_status(
+            records, list(panel.calendar), result["signal_date"]
+        )
+        if args.record:
+            write_forward_log(args.log, merge_snapshot(records, result))
+            result["recorded_to"] = str(Path(args.log))
         result["generated_at"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
         print(json.dumps(result, ensure_ascii=False, indent=2))
         logger.info(
@@ -143,6 +276,7 @@ def main() -> int:
             signal_date=result["signal_date"],
             regime=result["regime"],
             members=len(result["target"]),
+            recorded=args.record,
         )
         return 0
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:

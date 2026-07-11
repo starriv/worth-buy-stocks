@@ -9,7 +9,12 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
-from rotation_list import build_rotation_list  # noqa: E402
+from rotation_list import (  # noqa: E402
+    build_rotation_list,
+    evaluate_records,
+    merge_snapshot,
+    rebalance_status,
+)
 
 
 def _weekdays(start: str, count: int) -> list[str]:
@@ -74,6 +79,82 @@ class RotationListTests(unittest.TestCase):
             build_rotation_list(
                 FakePanel(uptrend=True), top_n=2, signal_date="2019-01-01"
             )
+
+
+class ForwardTrackingTests(unittest.TestCase):
+    def _result(self, signal_date: str):
+        return {
+            "signal_date": signal_date,
+            "strategy": "step63_top20",
+            "top_n": 2,
+            "regime": "risk_on",
+            "target": [
+                {"symbol": "NVDA", "composite": 92.0, "weight_pct": 50.0},
+                {"symbol": "META", "composite": 88.0, "weight_pct": 50.0},
+            ],
+        }
+
+    def test_merge_snapshot_dedupes_by_signal_date(self):
+        records = merge_snapshot([], self._result("2026-01-05"))
+        records = merge_snapshot(records, self._result("2026-01-05"))
+        records = merge_snapshot(records, self._result("2026-04-06"))
+        self.assertEqual(
+            [row["signal_date"] for row in records], ["2026-01-05", "2026-04-06"]
+        )
+        self.assertEqual(len(records[0]["members"]), 2)
+
+    def test_rebalance_status_counts_sessions_and_flags_due(self):
+        calendar = _weekdays("2026-01-05", 130)
+        records = [{"signal_date": calendar[0]}]
+        early = rebalance_status(records, calendar, calendar[30])
+        self.assertEqual(early["sessions_elapsed"], 30)
+        self.assertFalse(early["due"])
+        late = rebalance_status(records, calendar, calendar[70])
+        self.assertTrue(late["due"])
+        self.assertTrue(rebalance_status([], calendar, calendar[10])["due"])
+
+    def test_evaluate_settles_matured_records_against_benchmarks(self):
+        calendar = _weekdays("2026-01-05", 130)
+
+        class EvalPanel:
+            def __init__(self):
+                self.calendar = calendar
+                self.returns = {"NVDA": 20.0, "META": 10.0, "QQQ": 5.0, "SPY": 4.0}
+
+            def fwd_return_pct(self, symbol, time_index, horizon):
+                if time_index + horizon >= len(self.calendar):
+                    return None
+                return self.returns.get(symbol)
+
+        records = [
+            {"signal_date": calendar[0], "regime": "risk_on",
+             "members": [{"symbol": "NVDA"}, {"symbol": "META"}]},
+            {"signal_date": calendar[100], "regime": "risk_on",
+             "members": [{"symbol": "NVDA"}]},
+        ]
+        report = evaluate_records(records, EvalPanel())
+        self.assertEqual(len(report["matured"]), 1)
+        self.assertEqual(report["pending"], 1)
+        row = report["matured"][0]
+        self.assertEqual(row["portfolio_return_pct"], 15.0)
+        self.assertEqual(row["excess_vs_qqq_pct"], 10.0)
+        self.assertEqual(report["mean_excess_vs_qqq_pct"], 10.0)
+
+    def test_evaluate_risk_off_record_settles_as_cash(self):
+        calendar = _weekdays("2026-01-05", 130)
+
+        class EvalPanel:
+            def __init__(self):
+                self.calendar = calendar
+
+            def fwd_return_pct(self, symbol, time_index, horizon):
+                return -8.0 if symbol in ("QQQ", "SPY") else None
+
+        records = [{"signal_date": calendar[0], "regime": "risk_off", "members": []}]
+        report = evaluate_records(records, EvalPanel())
+        row = report["matured"][0]
+        self.assertEqual(row["portfolio_return_pct"], 0.0)
+        self.assertEqual(row["excess_vs_qqq_pct"], 8.0)
 
 
 if __name__ == "__main__":
