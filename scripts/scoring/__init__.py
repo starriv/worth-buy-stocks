@@ -4,7 +4,7 @@
 设计目标：贴近真实量化基金逻辑——规则化、可复现、风险调整、带否决层与仓位建议。
 模型的职责由「主观打分」变为「解释本引擎给出的分数」。纯函数，仅读分析字典。
 
-权重经逐因子 IC 回测校准（见 backtest_factor_ic.py）。3 个月前瞻 IC（2020-07→
+权重经逐因子 IC 回测校准（见 ``backtest.py factor-ic``）。3 个月前瞻 IC（2020-07→
 2026-06、57 期、含 2022 熊市、篮子纳入已退市票降幸存者偏差，仅看相对排序与符号）：
 momentum(≈0.042) ≈ rel_strength(≈0.043) > efficiency(≈0.027) ≫ technical /
 volume(负)。三个 ALPHA 因子在 honest 样本里接近且偏弱（早期 24 期牛市样本曾显示
@@ -21,6 +21,11 @@ momentum≈0.087，是过拟合）；因高度共线，55/35 的 momentum/rel �
     跌破下行 200 日线 → 55；仅跌破 200 日线 → 70；周线空头 → 50；跌破 MA60 → 65。
   确认 overlay（technical / volume，IC≈0，不进加权）：
     只做二元确认——技术转弱时把本可成立的「是」封顶为「观察」，绝不加分。
+
+v1.2 时机与执行修复：SPY/QQQ 作为研究标的时排除自身相对强度基准；深度回撤后的
+高置信放量强反转可以在 MA200 仍上行、周线未空头且核心数据完整时触发最多 15% 的
+独立试仓，但不抬高 composite。持仓达到 1R 后转保本并启用移动保护；冻结的高位反转
+或有效 MA60 下行破位只生成下一交易日开盘退出信号，不声称预测绝对顶部或底部。
 
 仓位建议（反波动率）：目标年化波动 / 实现波动 × 信号强度，上限 100%。
 账户 overlay（account_context）只读 Alpaca 持仓，把当前敞口与建议仓位比较，用于给出
@@ -70,6 +75,7 @@ from .constants import (
     LLM_CAP_HARD,
     LLM_CAP_SOFT,
     LOW_LIQUIDITY_USD,
+    MODEL_VERSION,
     TARGET_VOL_PCT,
 )
 from .engine import score
@@ -94,6 +100,7 @@ from .trade_plan import _position_pct, _trade_plan
 
 __all__ = [
     "ALPHA_WEIGHTS",
+    "MODEL_VERSION",
     "TARGET_VOL_PCT",
     "LOW_LIQUIDITY_USD",
     "LLM_CAP_HARD",

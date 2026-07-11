@@ -18,11 +18,11 @@
 
 - 行情入口新增 `cache_mode=auto|refresh|off`、`cache_db`；原位置参数调用保持兼容。
 - `indicators.py`、`scanner.py`、`chart.py`、三个 backtest CLI 和 `forward_log.py` 新增 `--cache` / `--cache-db`。
-- `cache_admin.py` 提供 `status`、`integrity-check`、`warm`、`refresh`、受保护的 `purge`。
+- `cache_admin.py` 提供 `status`、`integrity-check`、`warm`、`refresh`、全市场 `warm-market` 与受保护的 `purge`。
 
 ## 数据库变更
 
-默认路径为 `data/market-data.sqlite3`，可由 `WORTH_BUY_STOCKS_DB` 或 `--cache-db` 覆盖。schema v2 包含：
+默认路径为 `data/market-data.sqlite3`，可由 `WORTH_BUY_STOCKS_DB` 或 `--cache-db` 覆盖。行情缓存基础交付为 schema v2；资产目录功能将当前 schema 提升到 v3，包含：
 
 - `daily_bars`：只保存可评分的完成日线；
 - `live_daily_bars`：只保存当前 regular session 的未完成日 K；
@@ -30,8 +30,10 @@
 - `sync_ranges`：表达已查询覆盖，包括合法空区间（v2 移除了与主键重复的索引）；
 - `market_sessions`：缓存 XNYS regular calendar；
 - `feed_fallbacks`：记录 sip→iex 等 feed 受限回退，后续调用直接读可达 feed 的缓存，`--cache refresh` 会重新探测并清除。
+- `assets`：保存完整 Alpaca active US equity 目录、交易属性、当前状态、IEX 对账资格与排除原因；
+- `asset_catalog_state`：记录目录 UTC 同步时间和 source/current/tradable/eligible/unsupported 计数。
 
-v1 数据库在首次打开时自动迁移到 v2（保留 snapshot 与 coverage）。SQLite 使用 WAL、busy timeout、短事务和每操作独立连接（进程内按路径复用 store 实例）。范围 purge 会同步切开 coverage；`purge --all` 之后执行 VACUUM 回收文件空间；status/integrity 对缺失 DB 保持只读、不创建文件（status 使用 `quick_check`，完整扫描走 `integrity-check` 子命令）。
+v1/v2 数据库在首次打开时自动迁移到 v3，保留 snapshot、bars 与 coverage。SQLite 使用 WAL、busy timeout、短事务和每操作独立连接（进程内按路径复用 store 实例）。范围 purge 会同步切开 coverage；`purge --all` 之后执行 VACUUM 回收文件空间；status/integrity 对缺失 DB 保持只读、不创建文件（status 使用 `quick_check`，完整扫描走 `integrity-check` 子命令）。
 
 ## 会话策略要点
 
@@ -46,14 +48,18 @@ v1 数据库在首次打开时自动迁移到 v2（保留 snapshot 与 coverage�
 | `scripts/market_data_store.py` | schema、迁移、CRUD、coverage、并发与完整性 |
 | `scripts/market_data_cache.py` | session 分类、bars/snapshot read-through、修订与降级策略 |
 | `scripts/fetching.py` | 兼容门面、纯远端 transport、cache mode |
-| `scripts/cache_admin.py` | 缓存治理 CLI |
+| `scripts/cache_admin.py` | 缓存治理 CLI 与全市场 warm-market 运维入口 |
+| `scripts/market_warmup.py` | universe、coverage plan、有界 batch、resume 与维护窗口 |
+| `scripts/market_data_rate_limit.py` | page 级均匀限速、429 全局冷却与同库单实例 |
+| `scripts/asset_catalog.py` | Alpaca 资产目录拉取、UTC 日级 freshness 与原子替换 |
+| `scripts/market_reconcile.py` | 全资产目标选择与三年 coverage 查漏补缺 |
 | `scripts/indicators.py`、`scripts/scanner.py`、`scripts/chart.py` | 运行时接入与硬离线边界 |
 | `scripts/backtest_*.py`、`scripts/forward_log.py` | 研究入口接入与无缓存基线 |
 | `tests/test_*cache*.py`、`tests/test_market_data_policy.py` | schema/session/入口/admin/golden/故障与并发覆盖 |
 
 ## 验证
 
-- `unittest`: 392 passed；临时 pytest runtime：392 passed。
+- SQLite 基础交付时 `unittest`/临时 pytest 各 392 passed；后续 warm-market 增量验收见 `002-market-data-warmup.md`。
 - 真实 AAPL 5 次基准：cold 中位 4.1091s，warm 中位 0.0082s，提升 99.8%；warm 的 bars/snapshot/calendar 调用均为 0。
 - 真实 4 票 scanner 冒烟：cold 4.513s，warm 0.032s；warm 三类行情调用均为 0，DB 118,784 bytes。
 - remote/cache 的完整 `symbols.*.score` 与 scanner candidates 深度相等；live snapshot 写入后评分 `last_date` 仍为上一完成 session。

@@ -20,6 +20,15 @@ import urllib.parse
 import urllib.request
 
 from local_env import DEFAULT_ENV_PATH, get_env
+from skill_logging import (
+    add_logging_arguments,
+    bind_log_context,
+    clear_log_context,
+    configure_logging,
+    get_logger,
+)
+
+logger = get_logger("notify_telegram")
 
 API = "https://api.telegram.org/bot{token}/sendMessage"
 MAX_LEN = 4096  # Telegram 单条消息字符上限
@@ -76,18 +85,27 @@ def main():
     p.add_argument("--parse-mode", choices=["Markdown", "MarkdownV2", "HTML"],
                    help="Telegram 解析模式；缺省为纯文本")
     p.add_argument("--timeout", type=int, default=15)
+    add_logging_arguments(p)
     args = p.parse_args()
+    configure_logging(level=args.log_level, log_format=args.log_format)
+    clear_log_context()
+    bind_log_context(command="notify_telegram")
 
     token = get_env("TELEGRAM_BOT_TOKEN").strip()
     chat_id = get_env("TELEGRAM_CHAT_ID").strip()
     if not token or not chat_id:
         missing = [n for n, v in (("TELEGRAM_BOT_TOKEN", token),
                                   ("TELEGRAM_CHAT_ID", chat_id)) if not v]
-        sys.stderr.write(CONFIG_HINT)
+        logger.warning(
+            "telegram_configuration_missing",
+            missing=missing,
+            reason=CONFIG_HINT.strip(),
+        )
         _emit({"ok": False, "error": "telegram_not_configured", "missing": missing}, 2)
 
     text = _read_text(args).strip()
     if not text:
+        logger.warning("telegram_message_empty")
         _emit({"ok": False, "error": "empty_message"}, 1)
 
     try:
@@ -95,12 +113,23 @@ def main():
     except urllib.error.HTTPError as e:
         # 只回显状态码与响应体（不含 token），不暴露请求 URL
         detail = e.read().decode("utf-8", "replace")[:300]
+        logger.error(
+            "telegram_http_failed",
+            status_code=e.code,
+            reason=detail,
+        )
         _emit({"ok": False, "error": f"http_{e.code}", "detail": detail}, 1)
     except Exception as e:  # noqa: BLE001
+        logger.exception(
+            "telegram_send_failed",
+            error_type=type(e).__name__,
+            reason=str(e),
+        )
         _emit({"ok": False, "error": str(e)}, 1)
 
     if body.get("ok"):
         _emit({"ok": True, "message_id": body.get("result", {}).get("message_id")}, 0)
+    logger.error("telegram_response_failed", reason=body.get("description", "unknown"))
     _emit({"ok": False, "error": body.get("description", "unknown")}, 1)
 
 

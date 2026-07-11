@@ -4,6 +4,8 @@
 只调用本机 `alpaca` CLI 的 `data multi-bars`，不下单、不打印凭证。
 sip 等高级 feed 因订阅受限（403/forbidden）时自动回退 iex 一次。
 """
+from __future__ import annotations
+
 import datetime
 import json
 import subprocess
@@ -11,6 +13,12 @@ import threading
 from collections import defaultdict
 
 from market_data_cache import CACHE_MODES, CachePolicyError, MarketDataCache
+from market_data_rate_limit import (
+    AlpacaRateLimitError,
+    PageRateLimiter,
+    RateLimitRetryPolicy,
+    parse_retry_after,
+)
 from market_data_store import MarketDataCacheError, MarketDataStore, resolve_db_path
 
 
@@ -44,7 +52,17 @@ def _is_feed_limit(text):
     return any(s in t for s in ("403", "forbidden", "subscription", "not authorized"))
 
 
-def _fetch_feed(symbols, start, end, feed, adjustment, limit, timeout):
+def _is_rate_limit(text):
+    t = (text or "").lower()
+    return any(s in t for s in ("429", "too many requests", "rate limit"))
+
+
+def _fetch_feed(
+    symbols, start, end, feed, adjustment, limit, timeout,
+    *, request_limiter: PageRateLimiter | None = None,
+    retry_policy: RateLimitRetryPolicy | None = None,
+    stop_event=None,
+):
     """单一 feed 下拉取日线并处理分页；按时间戳去重后升序返回 {symbol: [bar,...]}。"""
     out = defaultdict(dict)  # symbol -> {timestamp: bar}，天然按 t 去重
     page_token = ""
@@ -63,12 +81,29 @@ def _fetch_feed(symbols, start, end, feed, adjustment, limit, timeout):
         ]
         if page_token:
             cmd += ["--page-token", page_token]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if res.returncode != 0:
-            detail = res.stderr.strip() or res.stdout.strip()
-            if _is_feed_limit(detail):
-                raise FeedLimitError(detail)
-            raise RuntimeError(f"alpaca multi-bars 失败: {detail}")
+        def request_page():
+            if request_limiter is not None:
+                request_limiter.acquire(stop_event)
+            response = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if response.returncode != 0:
+                detail = response.stderr.strip() or response.stdout.strip()
+                if _is_rate_limit(detail):
+                    raise AlpacaRateLimitError(
+                        detail, retry_after=parse_retry_after(detail)
+                    )
+                if _is_feed_limit(detail):
+                    raise FeedLimitError(detail)
+                raise RuntimeError(f"alpaca multi-bars 失败: {detail}")
+            return response
+
+        if retry_policy is not None:
+            if request_limiter is None:
+                raise ValueError("retry_policy requires request_limiter")
+            res = retry_policy.run(
+                request_page, limiter=request_limiter, stop_event=stop_event
+            )
+        else:
+            res = request_page()
         try:
             data = json.loads(res.stdout)
         except json.JSONDecodeError as e:
@@ -118,16 +153,29 @@ def _drop_unclosed_today(bars_map, now=None):
     return out, note
 
 
-def _fetch_bars_remote(symbols, start, end, feed, adjustment, limit, timeout):
+def _fetch_bars_remote(
+    symbols, start, end, feed, adjustment, limit, timeout,
+    *, request_limiter: PageRateLimiter | None = None,
+    retry_policy: RateLimitRetryPolicy | None = None,
+    stop_event=None,
+):
     """Remote-only bars transport with feed fallback and no cache/session policy."""
     try:
-        bars = _fetch_feed(symbols, start, end, feed, adjustment, limit, timeout)
+        bars = _fetch_feed(
+            symbols, start, end, feed, adjustment, limit, timeout,
+            request_limiter=request_limiter, retry_policy=retry_policy,
+            stop_event=stop_event,
+        )
         used_feed, note = feed, None
     except FeedLimitError as e:
         if feed.lower() == "iex":
             raise RuntimeError(f"iex feed 受限: {e}")
         note = f"{feed} feed 受限({e})，已回退 iex"
-        bars = _fetch_feed(symbols, start, end, "iex", adjustment, limit, timeout)
+        bars = _fetch_feed(
+            symbols, start, end, "iex", adjustment, limit, timeout,
+            request_limiter=request_limiter, retry_policy=retry_policy,
+            stop_event=stop_event,
+        )
         used_feed = "iex"
     return bars, used_feed, note
 

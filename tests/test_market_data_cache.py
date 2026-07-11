@@ -69,6 +69,7 @@ class TestPathAndMigration(CacheCase):
             {
                 "daily_bars", "live_daily_bars", "latest_snapshots",
                 "sync_ranges", "market_sessions", "feed_fallbacks",
+                "assets", "asset_catalog_state",
             },
         )
         with sqlite3.connect(self.db) as conn:
@@ -95,7 +96,7 @@ class TestPathAndMigration(CacheCase):
             "THIS IS NOT VALID SQL",
         )
         broken = M.MarketDataStore(self.db)
-        with patch.object(M, "_SCHEMA_V2", bad_schema):
+        with patch.object(M, "_SCHEMA_V3", bad_schema):
             with self.assertRaises(M.CacheSchemaError):
                 broken.schema_version()
         with sqlite3.connect(self.db) as conn:
@@ -162,7 +163,7 @@ class TestPathAndMigration(CacheCase):
         """,
     )
 
-    def test_v1_database_migrates_to_v2_preserving_snapshots_and_coverage(self):
+    def test_v1_database_migrates_to_v3_preserving_snapshots_and_coverage(self):
         self.db.parent.mkdir(parents=True)
         with sqlite3.connect(self.db) as conn:
             for statement in self._LEGACY_V1_DDL:
@@ -178,7 +179,7 @@ class TestPathAndMigration(CacheCase):
             )
             conn.execute("PRAGMA user_version = 1")
 
-        self.assertEqual(self.cache.schema_version(), 2)
+        self.assertEqual(self.cache.schema_version(), 3)
         snapshot = self.cache.get_latest_snapshots(["AAPL"], feed="iex")
         self.assertEqual(snapshot["symbols"]["AAPL"]["daily_bar"]["close"], 103)
         self.assertEqual(snapshot["meta"]["AAPL"]["session_date"], "2026-07-09")
@@ -203,7 +204,45 @@ class TestPathAndMigration(CacheCase):
         self.assertNotIn("idx_sync_ranges_lookup", indexes)
         self.assertIn("idx_latest_snapshots_session", indexes)
         self.assertIn("feed_fallbacks", names)
+        self.assertIn("assets", names)
+        self.assertIn("asset_catalog_state", names)
         self.assertNotIn("latest_snapshots_v1", names)
+
+    def test_v2_database_migrates_to_v3_preserving_bars_and_coverage(self):
+        self.db.parent.mkdir(parents=True)
+        with sqlite3.connect(self.db) as conn:
+            for statement in M._SCHEMA_V2:
+                conn.execute(statement)
+            conn.execute(
+                """
+                INSERT INTO daily_bars VALUES (
+                    'AAPL', '2026-07-09', 'iex', 'split',
+                    99, 102, 98, 101, 1000, 100.5, 42,
+                    '2026-07-09T04:00:00Z', ?
+                )
+                """,
+                (FETCHED_AT,),
+            )
+            conn.execute(
+                "INSERT INTO sync_ranges VALUES (?, ?, ?, ?, ?, ?)",
+                ("AAPL", "iex", "split", "2026-07-01", "2026-07-09", FETCHED_AT),
+            )
+            conn.execute("PRAGMA user_version = 2")
+
+        self.assertEqual(self.cache.schema_version(), 3)
+        bars = self.cache.get_daily_bars(
+            ["AAPL"], start_date="2026-07-01", end_date="2026-07-09",
+            feed="iex", adjustment="split",
+        )
+        self.assertEqual(bars["AAPL"][0]["c"], 101)
+        self.assertEqual(
+            self.cache.missing_ranges(
+                "AAPL", feed="iex", adjustment="split",
+                start_date="2026-07-01", end_date="2026-07-09",
+            ),
+            [],
+        )
+        self.assertIn("assets", self.cache.table_names())
 
 
 class TestDailyAndLiveBars(CacheCase):

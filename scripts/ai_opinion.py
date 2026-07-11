@@ -24,6 +24,12 @@ from typing import Any
 
 from agent_contracts import CONTRACT_VERSION, KIND_AI_OPINION, ContractError, validate_payload
 from local_env import get_env
+from skill_logging import (
+    add_logging_arguments,
+    bind_log_context,
+    clear_log_context,
+    configure_logging,
+)
 
 try:  # anthropic SDK 是可选依赖：未安装时整体降级为 unavailable，不影响评分
     import anthropic as _anthropic
@@ -269,7 +275,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate display-only AI opinions for a result JSON")
     parser.add_argument("--llm-context-file", help="optional news_context JSON for evidence enrichment")
     parser.add_argument("--symbols", help="comma-separated symbol filter")
+    add_logging_arguments(parser)
     args = parser.parse_args(argv)
+    configure_logging(level=args.log_level, log_format=args.log_format)
+    clear_log_context()
+    bind_log_context(command="ai_opinion")
 
     result = json.load(sys.stdin)
     llm_context = None

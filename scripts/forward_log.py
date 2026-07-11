@@ -15,23 +15,28 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
-import logging
 import os
 import sys
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
-from backtest_common import UNIVERSE  # noqa: E402
+from backtesting.universe import UNIVERSE  # noqa: E402
 from fetching import fetch_bars  # noqa: E402
 from pipeline import build_result  # noqa: E402
+from scoring import MODEL_VERSION  # noqa: E402
+from skill_logging import (  # noqa: E402
+    add_logging_arguments,
+    bind_log_context,
+    clear_log_context,
+    configure_logging,
+    get_logger,
+)
 
-MODEL_VERSION = "v1.1"  # 与 docs/model-card.md 同步；第四层语义从 v1.1 起记录
 DEFAULT_LOG = os.path.join(os.path.dirname(__file__), "..", "data", "forward_log.jsonl")
 DEFAULT_HORIZON = 63          # 交易日；与回测/确认层 A/B 的 63 日口径一致
 RECORD_LOOKBACK_DAYS = 750    # 打分所需历史（MA200 + 12-1 动量预热）
 BENCH = ["SPY", "QQQ"]
-
-logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+logger = get_logger("forward_log")
 
 
 # ---- 纯函数（离线可测） ----
@@ -49,11 +54,11 @@ def evaluate_records(
     calendar: list[str],
     horizon: int,
 ) -> dict[str, Any]:
-    """对账 v1.1 信号与 legacy v1.0 记录。
+    """对账 v1.1+ 信号与 legacy v1.0 记录。
 
-    v1.1：信号在已完成日线收盘后生成，股票与 SPY 都用 signal_date 后下一交易日
+    v1.1+：信号在已完成日线收盘后生成，股票与 SPY 都用 signal_date 后下一交易日
     的收盘作为统一、可复现的 entry；legacy 无 signal_date 记录保留原 last_close
-    口径并标记 method，绝不与 v1.1 混算。
+    口径并标记 method；所有模型版本在统计时严格分桶，不跨版本混算。
     """
     date_idx = {d: i for i, d in enumerate(calendar)}
 
@@ -183,7 +188,7 @@ def cmd_record(args) -> int:
         cache_mode=args.cache, cache_db=args.cache_db,
     )
     if note:
-        logging.info(note)
+        logger.info("market_data_note", operation="forward_record", reason=note)
     result = build_result(syms, bars, used_feed, args.adjustment)
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     run_date = now_utc.date().isoformat()
@@ -208,7 +213,7 @@ def cmd_record(args) -> int:
             "market_risk_off": bool(result.get("market_risk_off")),
             "signal_date": a.get("last_date"),
             "signal_close": a.get("last_close"),
-            # legacy readers still recognize last_close; v1.1 evaluate uses next-session price.
+            # legacy readers still recognize last_close; v1.1+ evaluates from next-session price.
             "last_close": a.get("last_close"),
         })
     merged = merge_records(load_jsonl(args.log), rows)
@@ -230,7 +235,7 @@ def cmd_evaluate(args) -> int:
         cache_mode=args.cache, cache_db=args.cache_db,
     )
     if note:
-        logging.info(note)
+        logger.info("market_data_note", operation="forward_evaluate", reason=note)
     closes = {s: {b["t"][:10]: b["c"] for b in bars.get(s, [])} for s in syms}
     calendar = sorted(closes.get("SPY", {}))
     res = evaluate_records(records, closes, calendar, args.horizon_days)
@@ -260,7 +265,11 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--symbols", help="逗号分隔；默认回测篮子 UNIVERSE")
     pe = sub.add_parser("evaluate", help="对到期记录对账，按 verdict 分桶")
     pe.add_argument("--horizon-days", type=int, default=DEFAULT_HORIZON)
+    add_logging_arguments(p)
     args = p.parse_args(argv)
+    configure_logging(level=args.log_level, log_format=args.log_format)
+    clear_log_context()
+    bind_log_context(command=f"forward_log.{args.cmd}", feed=args.feed)
     return cmd_record(args) if args.cmd == "record" else cmd_evaluate(args)
 
 

@@ -104,8 +104,16 @@ from ai_opinion import (  # noqa: E402
     sdk_available as ai_opinion_sdk_available,
     unavailable_opinions,
 )
+from skill_logging import (  # noqa: E402
+    add_logging_arguments,
+    bind_log_context,
+    clear_log_context,
+    configure_logging,
+    get_logger,
+)
 
 BENCHMARK_SYMBOLS = ("SPY", "QQQ")
+logger = get_logger("indicators")
 
 
 def _gather_parallel(*thunks):
@@ -131,7 +139,13 @@ def _validate_or_drop(kind, payload, label):
     try:
         validate_payload(kind, payload)
     except ContractError as e:
-        sys.stderr.write(f"警告: {label} 违反契约，已丢弃该 overlay: {e}\n")
+        logger.warning(
+            "overlay_contract_invalid",
+            kind=kind,
+            label=label,
+            error_type=type(e).__name__,
+            reason=str(e),
+        )
         return False
     return True
 
@@ -274,7 +288,11 @@ def _ai_opinion_from_args(args, result, llm_context):
         if s not in BENCHMARK_SYMBOLS
     ]
     if len(targets) > 1:
-        sys.stderr.write(f"提示: AI 意见将逐票调用（{len(targets)} 票），预计每票数十秒\n")
+        logger.info(
+            "ai_opinion_batch_started",
+            symbols_count=len(targets),
+            expected_latency="tens_of_seconds_per_symbol",
+        )
     artifact = opinions_for_result(result, llm_context=llm_context)
     if args.ai_opinion == "on":
         failures = unavailable_opinions(artifact, targets)
@@ -384,7 +402,11 @@ def main():
         help="AI 第二意见 overlay：auto=有 ANTHROPIC_API_KEY 时调用，on=失败时报错，off=关闭。只写入 supplemental，不参与 score",
     )
     p.add_argument("--ai-opinion-context-file", help="离线 AI 意见 overlay JSON")
+    add_logging_arguments(p)
     args = p.parse_args()
+    configure_logging(level=args.log_level, log_format=args.log_format)
+    clear_log_context()
+    bind_log_context(command="indicators", feed=args.feed)
     llm_context = _load_llm_context(args.llm_context_file)
 
     if args.input:
@@ -448,7 +470,11 @@ def main():
     try:
         validate_payload(KIND_RESULT, result)
     except ContractError as e:
-        sys.stderr.write(f"警告: 评分结果自检失败: {e}\n")
+        logger.warning(
+            "result_contract_invalid",
+            error_type=type(e).__name__,
+            reason=str(e),
+        )
 
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
@@ -458,6 +484,11 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:  # noqa: BLE001
+        logger.exception(
+            "indicators_failed",
+            error_type=type(e).__name__,
+            reason=str(e),
+        )
         json.dump({"error": str(e)}, sys.stdout, ensure_ascii=False)
         sys.stdout.write("\n")
         sys.exit(1)

@@ -59,13 +59,20 @@ def _f_momentum(a: dict[str, Any]) -> float | None:
 
 def _f_rel_strength(a: dict[str, Any]) -> float | None:
     rs = a.get("relative_strength_pct", {})
+    expected = a.get("relative_strength_benchmarks")
+    expected = expected if isinstance(expected, list) and expected else ["SPY", "QQQ"]
+    if any(bench not in rs for bench in expected):
+        return None
     # 每个视界内对两个基准取较弱者（须同时跑赢 SPY/QQQ，保留「对最差基准负责」），
     # 再对 3m/6m 两个视界取均值。旧版对 4 个读数全局取 min，会把不同视界混在一起、
     # 让单一最差读数把整体压到地板，过度惩罚且丢失视界信息。
     horizon_vals: list[float] = []
     for k in ("r3m_63d", "r6m_126d"):
-        per_bench = [(rs.get(bench) or {}).get(k) for bench in ("SPY", "QQQ")]
-        if all(v is not None for v in per_bench):
+        per_bench = [
+            (rs.get(bench) or {}).get(k)
+            for bench in expected
+        ]
+        if per_bench and all(value is not None for value in per_bench):
             horizon_vals.append(min(per_bench))
     if not horizon_vals:
         return None

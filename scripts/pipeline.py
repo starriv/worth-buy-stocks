@@ -82,7 +82,7 @@ def build_result(
 
     benches = {b: analyses.get(b, {}).get("returns_pct", {}) for b in ("SPY", "QQQ")}
     # 大盘 regime：SPY 跌破自身 200 日线 → 全局 risk-off（alpha 在此反转，见
-    # backtest_robustness）。仅 SPY 明确在 MA200 下方时为 True；above=True 或历史
+    # backtest.py robustness）。仅 SPY 明确在 MA200 下方时为 True；above=True 或历史
     # 不足(None) → None（不触发市场闸门）。点时点、无未来函数（用同一切片的 SPY）。
     spy_a = analyses.get("SPY")
     spy_above200 = spy_a.get("ma", {}).get("above_MA200") if isinstance(spy_a, dict) else None
@@ -91,9 +91,15 @@ def build_result(
         result["market_risk_off"] = True
     for sym, a in analyses.items():
         if "error" not in a:
+            # 基准本身不能与自己比较。普通股票仍同时对 SPY/QQQ 的较弱者负责；
+            # QQQ/SPY 只消费另一个可用基准，避免自比较恒为 0 把相对强度封在 50。
+            expected_benchmarks = [
+                bench for bench in ("SPY", "QQQ") if bench != sym
+            ]
+            a["relative_strength_benchmarks"] = expected_benchmarks
             a["relative_strength_pct"] = {
                 bench: relative_strength(a["returns_pct"], benches[bench])
-                for bench in ("SPY", "QQQ") if benches.get(bench)
+                for bench in expected_benchmarks if benches.get(bench)
             }
             sym_finnhub = finnhub_context_for_symbol(finnhub_context, sym)
             if sym_finnhub:

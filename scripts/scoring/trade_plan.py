@@ -71,18 +71,22 @@ def _trade_plan(
     unit = atr if atr and atr > 0 else last * 0.04
     high_30d = _thirty_day_high(a, last)
 
-    stop_candidates = [last - 2 * unit]
-    if ma60 and 0 < ma60 < last:
-        stop_candidates.append(ma60 * 0.98)
-    # 回调拐点入场：反弹起点低点是更贴近的结构性止损位
-    if timing_class == "pullback_reversal":
-        recent_low = _num(((a.get("entry_timing") or {}).get("pullback") or {}).get("recent_low_10d"))
-        if recent_low and 0 < recent_low < last:
+    recent_low = _num(
+        ((a.get("entry_timing") or {}).get("pullback") or {}).get("recent_low_10d")
+    )
+    if timing_class == "recovery_reversal" and recent_low and 0 < recent_low < last:
+        # 超跌反转的失效点是反转结构低点；宽止损由 15% 仓位上限约束账户风险。
+        stop_loss = recent_low * 0.99
+    else:
+        stop_candidates = [last - 2 * unit]
+        if ma60 and 0 < ma60 < last:
+            stop_candidates.append(ma60 * 0.98)
+        if timing_class == "pullback_reversal" and recent_low and 0 < recent_low < last:
             stop_candidates.append(recent_low * 0.99)
-    stop_candidates = [s for s in stop_candidates if s and 0 < s < last]
-    stop_loss = max(stop_candidates) if stop_candidates else last * 0.92
-    # Ensure stop has >=3% buffer below last close to absorb daily noise.
-    stop_loss = min(stop_loss, last * 0.97)
+        stop_candidates = [s for s in stop_candidates if s and 0 < s < last]
+        stop_loss = max(stop_candidates) if stop_candidates else last * 0.92
+        # Ensure stop has >=3% buffer below last close to absorb daily noise.
+        stop_loss = min(stop_loss, last * 0.97)
 
     pullback_entry = last - unit
     if ma20 and 0 < ma20 < last:
@@ -98,7 +102,10 @@ def _trade_plan(
     if verdict == "是":
         status = "entry_allowed"
         entry = last
-        if timing_class == "pullback_reversal":
+        if timing_class == "recovery_reversal":
+            status = "recovery_entry_allowed"
+            note = "高置信超跌反转试仓：按当前价附近受限介入，跌破反转结构低点退出，达到 1R 后转保本与移动保护"
+        elif timing_class == "pullback_reversal":
             note = "回调拐点确认：按当前价附近分批，跌破反弹起点低点或止损价即退出，不追离场后的反抽"
         else:
             note = "趋势与确认通过，可按当前价附近分批；超过追价上限则等待回踩或突破确认"
@@ -123,9 +130,18 @@ def _trade_plan(
     risk_per_share = entry_ref - stop_loss if entry_ref > stop_loss else None
     take_profit_1 = entry_ref + 2 * risk_per_share if risk_per_share else None
     take_profit_2 = entry_ref + 3 * risk_per_share if risk_per_share else None
-    trail = atr_pct * 2 if atr_pct is not None else 8.0
-    trail = min(max(trail, 6.0), 18.0)
+    if timing_class == "recovery_reversal":
+        trail = atr_pct * 3 if atr_pct is not None else 10.0
+        trail = min(max(trail, 10.0), 18.0)
+    else:
+        trail = atr_pct * 2 if atr_pct is not None else 8.0
+        trail = min(max(trail, 6.0), 18.0)
 
+    basis = (
+        "反转结构低点下方 1% 初始止损；达到 1R 后转保本并启用 ATR 约束移动保护"
+        if timing_class == "recovery_reversal"
+        else "ATR14 x2 + MA60 保护线；止盈按 2R/3R，达到 1R 后转保本并启用移动保护"
+    )
     return {
         "status": status,
         "reference_price": _price(last),
@@ -138,7 +154,10 @@ def _trade_plan(
         "take_profit_price": _price(take_profit_1),
         "take_profit_2_price": _price(take_profit_2),
         "trailing_stop_pct": _pct(trail),
+        "break_even_trigger_r": 1.0,
+        "break_even_buffer_pct": 0.25,
+        "trailing_activation_r": 1.0,
         "risk_per_share": _price(risk_per_share),
-        "basis": "ATR14 x2 + MA60 保护线；止盈按 2R/3R，移动止损按 ATR 波动率约束",
+        "basis": basis,
         "note": note,
     }

@@ -37,6 +37,16 @@ import json
 import os
 import sys
 
+from skill_logging import (
+    add_logging_arguments,
+    bind_log_context,
+    clear_log_context,
+    configure_logging,
+    get_logger,
+)
+
+logger = get_logger("chart")
+
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 # 价位线配色按行业惯例（TradingView 风格）：开仓线蓝、待触发挂单黄、止损红、
 # 止盈绿（第二档亮绿区分梯度）。蓝/绿用 bright 变体保证深色终端可读。
@@ -412,7 +422,11 @@ def main():
         "--cache-db",
         help="SQLite 文件路径；默认 skill 根目录 data/market-data.sqlite3",
     )
+    add_logging_arguments(p)
     args = p.parse_args()
+    configure_logging(level=args.log_level, log_format=args.log_format)
+    clear_log_context()
+    bind_log_context(command="chart", feed=args.feed)
 
     if args.input == "-" and args.plan == "-":
         raise RuntimeError("--input 与 --plan 不能同时从 stdin 读取")
@@ -447,7 +461,7 @@ def main():
         out = os.path.abspath(f"chart_{sym}.html" if args.html == "auto" else args.html)
         with open(out, "w", encoding="utf-8") as f:
             f.write(render_html(sym, bars, args.count, levels))
-        sys.stderr.write(f"HTML 图已写入: {out}\n")
+        logger.info("chart_html_written", path=out, symbol=sym)
         if args.open:
             import webbrowser
             webbrowser.open("file://" + out)
@@ -459,5 +473,9 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:  # noqa: BLE001
-        sys.stderr.write(f"chart error: {e}\n")
+        logger.exception(
+            "chart_failed",
+            error_type=type(e).__name__,
+            reason=str(e),
+        )
         sys.exit(1)

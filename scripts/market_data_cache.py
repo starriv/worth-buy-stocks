@@ -298,6 +298,13 @@ class MarketDataCache:
         candidate = dates[max(0, len(dates) - self.overlap_sessions)]
         return max(candidate, request_start)
 
+    def _cached_extent_start(self, symbol: str, feed: str, adjustment: str) -> str | None:
+        try:
+            ranges = self.store.get_sync_ranges(symbol, feed=feed, adjustment=adjustment)
+        except MarketDataCacheError:
+            return None
+        return str(ranges[0]["start_date"]) if ranges else None
+
     def _record_feed_outcome(
         self, requested_feed: str, effective_feed: str, actual_feed: str, mode: str
     ) -> None:
@@ -463,10 +470,22 @@ class MarketDataCache:
                 feed=actual_feed,
                 adjustment=adjustment,
             )
-            revised = [] if mode == "refresh" else [
-                symbol for symbol in group_symbols
-                if overlap_changed(existing_overlap.get(symbol, []), completed.get(symbol, []))
-            ]
+            # A revision on overlapping completed rows (split/dividend
+            # re-adjustment, source correction) invalidates the symbol's whole
+            # cached history, not just the requested slice.  In refresh mode
+            # the replace below already heals the fetched range, so only
+            # history cached before the range still needs the full refetch.
+            revised = []
+            for symbol in group_symbols:
+                if not overlap_changed(
+                    existing_overlap.get(symbol, []), completed.get(symbol, [])
+                ):
+                    continue
+                if mode == "refresh":
+                    extent = self._cached_extent_start(symbol, actual_feed, adjustment)
+                    if extent is None or extent >= gap_start:
+                        continue
+                revised.append(symbol)
             normal = [symbol for symbol in group_symbols if symbol not in revised]
             normal_bars = {symbol: completed[symbol] for symbol in normal if symbol in completed}
             if normal:
@@ -492,9 +511,11 @@ class MarketDataCache:
                     memory = _merge_bar_maps(memory, normal_bars)
 
             for symbol in revised:
+                extent = self._cached_extent_start(symbol, actual_feed, adjustment)
+                refetch_start = min(extent, requested_start) if extent else requested_start
                 try:
                     full_remote, full_feed, full_note = self.remote_bars_fetcher(
-                        [symbol], requested_start, effective_end, actual_feed,
+                        [symbol], refetch_start, effective_end, actual_feed,
                         adjustment, limit, timeout,
                     )
                 except Exception as exc:  # noqa: BLE001 - transport boundary
@@ -509,24 +530,30 @@ class MarketDataCache:
                 full_coverage_end = self._tail_coverage_end(
                     full_completed, effective_end, state, session_dates, notes
                 )
-                if full_coverage_end is not None and full_coverage_end >= requested_start:
+                if full_coverage_end is not None and full_coverage_end >= refetch_start:
                     try:
                         self.store.commit_daily_sync(
                             full_completed, [symbol],
                             feed=full_feed,
                             adjustment=adjustment,
-                            start_date=requested_start,
+                            start_date=refetch_start,
                             end_date=full_coverage_end,
                             replace=True,
                         )
                     except MarketDataCacheError as exc:
                         write_failures.append(str(exc))
+                requested_bars = [
+                    bar for bar in full_completed.get(symbol, [])
+                    if _bar_date(bar) >= requested_start
+                ]
                 memory = _replace_symbol_range(
-                    memory, symbol, full_completed.get(symbol, []),
+                    memory, symbol, requested_bars,
                     requested_start, effective_end,
                 )
                 used_feed = full_feed
-                notes.append(f"{symbol} 重叠日线发生修订，已刷新完整请求范围")
+                notes.append(
+                    f"{symbol} 重叠日线发生修订，已刷新全部缓存历史（{refetch_start}..{effective_end}）"
+                )
 
         if transport_failures and not memory:
             raise transport_failures[0]

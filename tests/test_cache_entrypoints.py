@@ -12,14 +12,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
-import backtest_common as B  # noqa: E402
-import backtest_factor_ic as BFI  # noqa: E402
-import backtest_robustness as BR  # noqa: E402
-import backtest_score as BS  # noqa: E402
+import backtest as BT  # noqa: E402
+import backtesting.panel as BP  # noqa: E402
 import chart as C  # noqa: E402
 import fetching as F  # noqa: E402
 import forward_log as FL  # noqa: E402
@@ -56,10 +54,10 @@ class TestEntrypointControls(unittest.TestCase):
             "cache_mode": "refresh", "cache_db": "/tmp/chart-cache.sqlite3"
         })
 
-    def test_backtest_common_threads_cache_controls(self):
+    def test_cross_sectional_panel_threads_cache_controls(self):
         rows = {"SPY": [_bar("2026-07-09", 500)], "QQQ": [_bar("2026-07-09", 600)]}
-        with patch.object(B, "fetch_bars", return_value=(rows, "iex", "cache hit")) as fetch:
-            panel = B.load_panel(
+        with patch.object(BP, "fetch_bars", return_value=(rows, "iex", "cache hit")) as fetch:
+            panel = BP.load_panel(
                 "iex", "split", 60, history_days=30,
                 cache_mode="off", cache_db="/tmp/backtest-cache.sqlite3",
             )
@@ -68,16 +66,20 @@ class TestEntrypointControls(unittest.TestCase):
             "cache_mode": "off", "cache_db": "/tmp/backtest-cache.sqlite3"
         })
 
-    def test_backtest_clis_thread_cache_controls(self):
-        modules = (BFI, BS, BR)
-        for module in modules:
-            with self.subTest(module=module.__name__), \
+    def test_unified_backtest_research_subcommands_thread_cache_controls(self):
+        for command, event in (
+            ("factor-ic", "backtest_factor_ic"),
+            ("score", "backtest_score"),
+            ("robustness", "backtest_robustness"),
+        ):
+            run = Mock()
+            with self.subTest(command=command), \
                  patch.object(sys, "argv", [
-                     f"{module.__name__}.py", "--cache", "refresh",
+                     "backtest.py", command, "--cache", "refresh",
                      "--cache-db", "/tmp/research.sqlite3",
                  ]), \
-                 patch.object(module, "run") as run:
-                module.main()
+                 patch.dict(BT.RESEARCH_COMMANDS, {command: (event, run)}):
+                self.assertEqual(BT.main(), 0)
             run.assert_called_once_with(
                 "iex", "split", 60,
                 cache_mode="refresh", cache_db="/tmp/research.sqlite3",

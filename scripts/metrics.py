@@ -380,6 +380,13 @@ ENTRY_EXT_RSI_SOFT = 75.0
 ENTRY_PULLBACK_MIN_DEPTH_PCT = -4.0
 # 反弹确认：反转日之外还需的独立触发信号数
 ENTRY_BOUNCE_MIN_SIGNALS = 2
+# 趋势破坏后的高置信超跌反转：与强趋势内回调分开，全部是硬条件。
+RECOVERY_MIN_DEPTH_PCT = -12.0
+RECOVERY_MIN_DAILY_RETURN_PCT = 3.0
+RECOVERY_MIN_CLOSE_STRENGTH = 0.75
+RECOVERY_MIN_VOL_RATIO = 1.5
+RECOVERY_MIN_SIGNALS = 4
+RECOVERY_MAX_EXT_ATR = 0.75
 
 
 def _ma_reclaim(closes, n, lookback=2):
@@ -399,11 +406,12 @@ def _ma_reclaim(closes, n, lookback=2):
 
 
 def entry_timing(closes, highs, lows, volumes):
-    """入场时机画像：过热度 + 趋势内回调拐点识别。历史 <60 根返回 None。
+    """入场时机画像：过热度、趋势内回调与高置信超跌反转。历史 <60 根返回 None。
 
     只做时机分类，不判断趋势资格（趋势/相对强度由 ALPHA 因子与闸门负责）：
       - overextended：价格显著超出短期均值/RSI 超买 → 追高风险
       - pullback_reversal：趋势完好 + 近期回调 + 最后一根出现放量反转触发
+      - recovery_reversal：趋势破坏后深度回撤 + 放量强反转，只提供受限试仓候选
       - pullback_no_trigger：回调中但反转未确认
       - trend_continuation：趋势正常推进、未过热
       - trend_broken：跌破中期均线（资格由闸门另行否决）
@@ -463,6 +471,7 @@ def entry_timing(closes, highs, lows, volumes):
     # 反转日：收阳且收在日内区间上半部，或直接收在前一根最高价上方
     prev_close = closes[-2]
     up_day = last > prev_close
+    daily_return_pct = round((last / prev_close - 1) * 100, 2) if prev_close else None
     day_range = highs[-1] - lows[-1]
     close_strength = round((last - lows[-1]) / day_range, 2) if day_range else None
     bounce_day = bool(up_day and (
@@ -510,7 +519,21 @@ def entry_timing(closes, highs, lows, volumes):
         and (ma200 is None or last > ma200 * 0.99)
     )
 
-    if not trend_intact:
+    recovery_reversal = bool(
+        not trend_intact
+        and depth is not None and depth <= RECOVERY_MIN_DEPTH_PCT
+        and bounce_day
+        and daily_return_pct is not None and daily_return_pct >= RECOVERY_MIN_DAILY_RETURN_PCT
+        and close_strength is not None and close_strength >= RECOVERY_MIN_CLOSE_STRENGTH
+        and vol_ratio is not None and vol_ratio >= RECOVERY_MIN_VOL_RATIO
+        and signal_count >= RECOVERY_MIN_SIGNALS
+        and ext_atr is not None and ext_atr <= RECOVERY_MAX_EXT_ATR
+    )
+
+    if recovery_reversal:
+        cls = "recovery_reversal"
+        timing_score = 95
+    elif not trend_intact:
         cls = "trend_broken"
         timing_score = 10
     elif overextended:
@@ -550,6 +573,7 @@ def entry_timing(closes, highs, lows, volumes):
         "bounce": {
             "bounce_day": bounce_day,
             "up_day": up_day,
+            "daily_return_pct": daily_return_pct,
             "close_strength": close_strength,
             "vol_ratio_vs_ma20": vol_ratio,
             "vol_expand": vol_expand,
@@ -559,6 +583,7 @@ def entry_timing(closes, highs, lows, volumes):
             "macd_hist_rising": macd_rising,
             "rsi6_rebound": rsi6_rebound,
             "signal_count": signal_count,
+            "recovery_hard_pass": recovery_reversal,
         },
         "classification": cls,
         "timing_score_pct": timing_score,

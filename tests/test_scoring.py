@@ -242,6 +242,61 @@ class TestEntryTimingOverlay(unittest.TestCase):
         self.assertLess(r["confirmation"]["volume_pct"], 40)
         self.assertEqual(r["verdict"], "观察")
 
+    def test_recovery_reversal_can_override_price_gates_with_small_position(self):
+        a = _strong()
+        a["momentum"] = {"m12_1_pct": -20.0, "ann_return_6m_pct": -30.0,
+                         "risk_adj_6m": -0.8}
+        a["ma"]["above_MA60"] = False
+        a["ma"]["above_MA200"] = False
+        a["ma"]["MA200_rising"] = True
+        a["entry_timing"] = {
+            "classification": "recovery_reversal",
+            "timing_score_pct": 95,
+            "pullback": {"recent_low_10d": 90.0},
+        }
+        r = S.score(a, market_risk_off=True)
+        self.assertEqual(r["verdict_before_entry_timing"], "否")
+        self.assertEqual(r["verdict"], "是")
+        self.assertLessEqual(r["suggested_position_pct"], 15.0)
+        self.assertEqual(r["trade_plan"]["status"], "recovery_entry_allowed")
+        self.assertEqual(r["trade_plan"]["stop_loss_price"], 89.1)
+
+    def test_recovery_reversal_requires_rising_long_term_trend(self):
+        a = _strong()
+        a["ma"]["above_MA60"] = False
+        a["ma"]["above_MA200"] = False
+        a["ma"]["MA200_rising"] = False
+        a["entry_timing"] = {
+            "classification": "recovery_reversal",
+            "timing_score_pct": 95,
+            "pullback": {"recent_low_10d": 90.0},
+        }
+        r = S.score(a, market_risk_off=True)
+        self.assertNotEqual(r["verdict"], "是")
+
+    def test_overextended_weak_close_emits_next_open_exit(self):
+        a = _strong()
+        a["entry_timing"] = {
+            "classification": "overextended",
+            "timing_score_pct": 20,
+            "bounce": {
+                "up_day": False,
+                "close_strength": 0.30,
+                "macd_hist_rising": False,
+                "vol_ratio_vs_ma20": 1.1,
+            },
+        }
+        r = S.score(a)
+        self.assertEqual(r["position_exit"]["action"], "exit_next_open")
+        self.assertEqual(r["position_exit"]["classification"], "overextended_reversal")
+
+    def test_falling_ma60_break_emits_next_open_exit(self):
+        a = _strong()
+        a["ma"]["above_MA60"] = False
+        a["ma"]["MA60_rising"] = False
+        r = S.score(a)
+        self.assertEqual(r["position_exit"]["classification"], "trend_break")
+
 class TestPositionSizing(unittest.TestCase):
     def test_higher_vol_smaller_position(self):
         lo, hi = _strong(), _strong()
@@ -493,6 +548,40 @@ class TestRelStrength(unittest.TestCase):
         r = S.score(a)
         self.assertIsNone(r["factor_breakdown"]["rel_strength"]["score_pct"])
         self.assertEqual(r["verdict"], "无法评分")
+
+    def test_explicit_self_exclusion_allows_one_benchmark(self):
+        a = _strong()
+        a["relative_strength_benchmarks"] = ["SPY"]
+        a["relative_strength_pct"] = {
+            "SPY": {"r3m_63d": 12.0, "r6m_126d": 15.0}
+        }
+        r = S.score(a)
+        self.assertGreater(r["factor_breakdown"]["rel_strength"]["score_pct"], 50)
+
+    def test_pipeline_excludes_qqq_from_its_own_benchmarks(self):
+        import pipeline as P
+        from datetime import date, timedelta
+
+        def bars(closes):
+            d0 = date(2024, 1, 1)
+            return [
+                {"t": f"{(d0 + timedelta(days=i)).isoformat()}T05:00:00Z",
+                 "o": c, "h": c * 1.01, "l": c * 0.99, "c": c, "v": 1_000_000}
+                for i, c in enumerate(closes)
+            ]
+
+        n = 300
+        spy = [100.0 * (1.001 ** i) for i in range(n)]
+        qqq = [100.0 * (1.003 ** i) for i in range(n)]
+        result = P.build_result(
+            ["QQQ", "SPY"], {"QQQ": bars(qqq), "SPY": bars(spy)}, "iex", "split"
+        )
+        analysis = result["symbols"]["QQQ"]
+        self.assertEqual(analysis["relative_strength_benchmarks"], ["SPY"])
+        self.assertEqual(set(analysis["relative_strength_pct"]), {"SPY"})
+        self.assertGreater(
+            analysis["score"]["factor_breakdown"]["rel_strength"]["score_pct"], 50
+        )
 
 
 class TestLLMOverlay(unittest.TestCase):

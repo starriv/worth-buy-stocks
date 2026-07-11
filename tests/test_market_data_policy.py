@@ -230,7 +230,54 @@ class TestReadThrough(PolicyCase):
         )
         self.assertEqual(len(after.remote_calls), 2)
         self.assertEqual(result["AAPL"][2]["c"], 102)
-        self.assertIn("已刷新完整请求范围", note)
+        self.assertIn("已刷新全部缓存历史", note)
+
+    def test_overlap_revision_heals_cached_history_before_requested_range(self):
+        pre = Harness(self.db, _utc("2026-07-10T12:00:00Z"))
+        pre.cache().load_bars(
+            ["AAPL"], "2026-07-06", "2026-07-10",
+            "iex", "split", 10000, 30,
+        )
+        # Simulate a stale adjustment baseline: both a row inside the next
+        # request (triggers detection) and one before it (must be healed too).
+        pre.store.upsert_daily_bars(
+            {"AAPL": [_bar("2026-07-06", 999), _bar("2026-07-08", 999)]},
+            feed="iex", adjustment="split",
+        )
+        after = Harness(self.db, _utc("2026-07-10T17:16:00Z"))
+        result, _, note = after.cache().load_bars(
+            ["AAPL"], "2026-07-08", "2026-07-10",
+            "iex", "split", 10000, 30,
+        )
+        self.assertEqual(after.remote_calls[-1][1:3], ("2026-07-06", "2026-07-10"))
+        self.assertEqual(result["AAPL"][0]["c"], 102)
+        healed = after.store.get_daily_bars(
+            ["AAPL"], start_date="2026-07-06", end_date="2026-07-06",
+            feed="iex", adjustment="split",
+        )
+        self.assertEqual(healed["AAPL"][0]["c"], 100)
+        self.assertIn("已刷新全部缓存历史", note)
+
+    def test_refresh_mode_heals_cached_history_before_requested_range(self):
+        pre = Harness(self.db, _utc("2026-07-10T17:16:00Z"))
+        pre.cache().load_bars(
+            ["AAPL"], "2026-07-06", "2026-07-10",
+            "iex", "split", 10000, 30,
+        )
+        pre.store.upsert_daily_bars(
+            {"AAPL": [_bar("2026-07-06", 999), _bar("2026-07-09", 999)]},
+            feed="iex", adjustment="split",
+        )
+        after = Harness(self.db, _utc("2026-07-10T17:16:00Z"))
+        after.cache().load_bars(
+            ["AAPL"], "2026-07-08", "2026-07-10",
+            "iex", "split", 10000, 30, mode="refresh",
+        )
+        healed = after.store.get_daily_bars(
+            ["AAPL"], start_date="2026-07-06", end_date="2026-07-06",
+            feed="iex", adjustment="split",
+        )
+        self.assertEqual(healed["AAPL"][0]["c"], 100)
 
     def test_sip_fallback_is_stored_only_under_actual_iex_feed(self):
         h = Harness(self.db, _utc("2026-07-10T12:00:00Z"), actual_feed="iex")

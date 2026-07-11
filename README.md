@@ -12,6 +12,7 @@
 - 检查近 30 天新闻、公告和财报日历；事件风险可以降级结论，利好不加分。
 - 生成入场、回踩、止损、2R / 3R 止盈和追价上限。
 - 输出终端 K 线与自包含 HTML 图；可选展示 Claude 第二意见作对照。
+- 对单个标的做 final-only 历史评分回放、21/63 日事件研究和成本后交易仿真，生成 canonical JSON 与交互式 HTML。
 
 ## 快速使用
 
@@ -21,6 +22,7 @@
 mkdir -p ~/.codex/skills
 git clone https://github.com/starriv/worth-buy-stocks.git \
   ~/.codex/skills/worth-buy-stocks
+python3 -m pip install -r ~/.codex/skills/worth-buy-stocks/requirements.txt
 ```
 
 准备 Python 3.10+、Alpaca CLI 和可读取美股行情的 Alpaca 凭证。完整配置见[本地环境设置清单](references/setup.md)。
@@ -34,15 +36,32 @@ git clone https://github.com/starriv/worth-buy-stocks.git \
 简单看一下 MSFT，只给结论
 ```
 
-也可以直接运行脚本：
+仓库根目录提供统一 Make 入口：
 
 ```bash
-# 单股评分；SPY、QQQ 用于市场环境和相对强度比较
-python3 scripts/indicators.py --symbols NVDA,SPY,QQQ
-
-# 全市场扫描
-python3 scripts/scanner.py --top 20
+make help
+make analyze SYMBOLS=NVDA,SPY,QQQ
+make scan TOP=20
 ```
+
+Makefile 只转发现有 Python CLI，不复制评分或行情逻辑；recipe 保持静默，因此分析 JSON 仍是 stdout 的唯一业务输出。公共配置通过 `PYTHON`、`CACHE_DB`、`FEED` 等变量覆盖，子命令附加 flag 用 `ARGS`，日志等位于 subcommand 之前的全局 flag 用 `GLOBAL_ARGS`。
+
+所有回测由 `scripts/backtest.py` 统一提供；Make 中的 `backtest-factor`、`backtest-score`、`backtest-robustness` 和 `backtest-visual` 都转发该入口。
+
+## 日志与输出通道
+
+所有 CLI 通过 `structlog` 统一记录运行日志：业务 JSON、终端 K 线和回测报告继续写 stdout，进度、告警和异常只写 stderr。默认 `--log-format auto` 在交互终端显示可读 console，stderr 被重定向时输出逐行可解析的 JSONL。
+
+```bash
+# stdout 是单一结果 JSON；stderr 重定向后是 JSONL 日志
+python3 scripts/indicators.py --symbols AAPL,SPY,QQQ \
+  > result.json 2> run.log
+
+# 显式选择格式和级别
+python3 scripts/scanner.py --log-format console --log-level WARNING --top 20
+```
+
+所有公共入口支持 `--log-level DEBUG|INFO|WARNING|ERROR` 和 `--log-format auto|console|json`。也可设置 `WORTH_BUY_STOCKS_LOG_LEVEL`、`WORTH_BUY_STOCKS_LOG_FORMAT`；CLI 参数优先。日志会统一脱敏常见 key/token/authorization/cookie 字段与异常文本，但调用方仍不得主动记录凭证、完整环境变量或账户原始对象。
 
 ## 本地行情缓存
 
@@ -57,16 +76,48 @@ python3 scripts/scanner.py --top 20
 
 ```bash
 # 查看/校验缓存（只读）
-python3 scripts/cache_admin.py status
-python3 scripts/cache_admin.py integrity-check
+make status
+make integrity
 
 # 预热或强制刷新
-python3 scripts/cache_admin.py warm --symbols AAPL,SPY,QQQ
-python3 scripts/cache_admin.py refresh --symbols AAPL,SPY,QQQ --start 2025-01-01
+make cache-warm SYMBOLS=AAPL,SPY,QQQ
+make cache-refresh SYMBOLS=AAPL,SPY,QQQ START=2025-01-01
 
-# 清理必须显式指定 symbol、日期范围或 --all
-python3 scripts/cache_admin.py purge --symbols AAPL --start 2026-07-01 --end 2026-07-10
+# 先规划全市场三年缺口（不请求 bars），再按一小时维护窗口安全预热
+make warm-market-plan
+make warm-market YEARS=3 WORKERS=4 BATCH_SIZE=50 MAX_RPM=120 MAX_RUNTIME=3600
+
+# 每日同步 Alpaca 资产目录，并按全部可用标的查漏补缺
+make sync-assets
+make reconcile-plan
+make reconcile-market YEARS=3 WORKERS=4 BATCH_SIZE=50 MAX_RPM=120 MAX_RUNTIME=3600
+
+# 清理使用独立空默认变量；全库清理还要求 CONFIRM=purge-all
+make cache-purge PURGE_SYMBOLS=AAPL START=2026-07-01 END=2026-07-10
+make cache-purge-all CONFIRM=purge-all
 ```
+
+`warm-market` 自动发现 NYSE/NASDAQ scanner 股池，只拉 `iex + split` 的已完成日线，不拉 snapshot。所有分页与重试共享本进程的均匀限速器；默认 120 RPM、允许上限 180，低于 Alpaca Basic 的 200 RPM，但无法约束同账号运行的其他程序。命令按 `sync_ranges` 自动续传，同一数据库只允许一个实例；Ctrl-C、维护窗口到期或单 batch 失败后可直接复跑。`--symbols-file` 只用于低速 canary/复现，其完成状态不代表全市场。
+
+`sync-assets` 每个 UTC 日期最多远端刷新一次，将 Alpaca 当前 active US equity 写入同一个 SQLite，并保留不再出现的资产历史。`reconcile-market` 以目录中当前、可交易、Basic IEX 可覆盖的标的为目标，复用 warm-market 的缺口规划、限速和断点续传；非交易资产和 OTC 会保留并标明排除原因。完整任务必须显式运行，建议先 dry-run；`status` 会显示资产目录时间、目标数和三年覆盖缺口。
+
+## 单标的可视化回测
+
+缓存覆盖充分后，一条命令即可对单个标的做逐交易日评分回放，并生成 JSON 与自包含 HTML：
+
+```bash
+make backtest-visual SYMBOL=AAPL START=2021-07-01 END=2026-07-09
+```
+
+回测默认 `cache-only`：SQLite 以只读模式打开，不补网、不迁移、不写 coverage，只使用标的、SPY、QQQ 的 final 日线。周末、休市日、未收盘当天或未来的结束日会依据库内交易日历截到最近完成 session；已完成 session 的真实缺口或不足 260 个 session 的预热仍会明确失败。需要补齐时先显式运行 `make cache-warm SYMBOLS=AAPL,SPY,QQQ START=2020-07-01 END=2026-07-09`，然后重跑回测。输出默认落在 gitignored 的 `artifacts/backtests/`，语义 hash 用于确认同数据、模型和参数下的结果可复现。
+
+报告同时展示 21/63 日绝对及相对收益事件研究、非重叠推断样本、rank-only 与 disciplined-verdict 的下一开盘固定研究窗口，以及执行建议仓位、初始止损、1R 保本、移动保护和下一开盘信号退出的 managed 仿真。固定窗口 marker 明确标为研究起点/窗口终点，不代表系统识别高位。HTML 只渲染 canonical artifact，不重算业务指标；历史回测不回填新闻、账户、Snapshot、Finnhub 或 AI opinion。
+
+contract 1.4 另行保留 stateful 实验场景及其恢复/重新入场状态记录。该场景未通过预注册多标的 holdout，报告明确标为“已拒绝”，旧 managed 继续作为正式基线。
+
+2021-07-01 至 2026-07-09 的 AAPL v1.1 验收结果为 `inconclusive`：63 日非重叠推断样本 19 个，其中最终结论为“是”的样本仅 1 个，不能据此确认或否定评分有效性。完整口径和证据见 [Model Card](docs/model-card.md) 与[回测契约](docs/backtesting-contract.md)。
+
+2023-07-03 至 2026-07-09 的 QQQ v1.2 修复验收同样为 `inconclusive`：自基准、超跌反转、计划仓位和 managed 退出已经修正，managed 收益由旧 artifact 的 −7.45% 改善到 +7.09%，但同期 QQQ 买入持有为 +95.29%，且 63 日“是”组相对非“是”组的置信区间方向不利。报告因此只证明执行缺陷被修复，不证明评分 alpha 有效。
 
 ## 输出示例
 
@@ -193,6 +244,8 @@ flowchart LR
 
 - [本地环境设置](references/setup.md)
 - [评分模型与校准证据](docs/model-card.md)
+- [单标的回测契约](docs/backtesting-contract.md)
+- [单标的可视化回测实现与验收](docs/feature/005-single-symbol-visual-backtest.md)
 - [脚本架构、命令和回测说明](scripts/README.md)
 - [并行采集数据契约](references/agent-contracts.md)
 

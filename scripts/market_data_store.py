@@ -30,12 +30,14 @@ try:
 except Exception:  # pragma: no cover - hosts without tzdata degrade to UTC dates
     _MARKET_TZ = None
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_BUSY_TIMEOUT_MS = 5_000
 ENV_DB_PATH = "WORTH_BUY_STOCKS_DB"
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = SKILL_ROOT / "data" / "market-data.sqlite3"
 _SYMBOL_CHUNK = 400
+ASSET_CATALOG = "alpaca_us_equity_active"
+IEX_ELIGIBLE_EXCHANGES = frozenset({"AMEX", "ARCA", "BATS", "NASDAQ", "NYSE"})
 _SENSITIVE_PAYLOAD_KEYS = {
     "api_key", "apikey", "secret", "token", "access_token", "refresh_token",
     "account_id", "chat_id", "password", "authorization",
@@ -77,6 +79,51 @@ _FEED_FALLBACKS_DDL = """
         updated_at TEXT NOT NULL
     ) WITHOUT ROWID
     """
+
+_ASSETS_DDL = """
+    CREATE TABLE IF NOT EXISTS assets (
+        asset_id TEXT NOT NULL PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        asset_class TEXT NOT NULL,
+        exchange TEXT NOT NULL,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        tradable INTEGER NOT NULL CHECK (tradable IN (0, 1)),
+        fractionable INTEGER NOT NULL CHECK (fractionable IN (0, 1)),
+        marginable INTEGER NOT NULL CHECK (marginable IN (0, 1)),
+        shortable INTEGER NOT NULL CHECK (shortable IN (0, 1)),
+        easy_to_borrow INTEGER NOT NULL CHECK (easy_to_borrow IN (0, 1)),
+        is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+        data_eligible INTEGER NOT NULL CHECK (data_eligible IN (0, 1)),
+        excluded_reason TEXT,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL
+    ) WITHOUT ROWID
+    """
+_ASSETS_SYMBOL_INDEX_DDL = """
+    CREATE INDEX IF NOT EXISTS idx_assets_symbol ON assets (symbol, is_current)
+    """
+_ASSETS_ELIGIBLE_INDEX_DDL = """
+    CREATE INDEX IF NOT EXISTS idx_assets_eligible
+    ON assets (is_current, data_eligible, symbol)
+    """
+_ASSET_CATALOG_STATE_DDL = """
+    CREATE TABLE IF NOT EXISTS asset_catalog_state (
+        catalog TEXT NOT NULL PRIMARY KEY,
+        synced_at TEXT NOT NULL,
+        source_count INTEGER NOT NULL,
+        current_count INTEGER NOT NULL,
+        tradable_count INTEGER NOT NULL,
+        eligible_count INTEGER NOT NULL,
+        unsupported_count INTEGER NOT NULL
+    ) WITHOUT ROWID
+    """
+_ASSET_SCHEMA = (
+    _ASSETS_DDL,
+    _ASSETS_SYMBOL_INDEX_DDL,
+    _ASSETS_ELIGIBLE_INDEX_DDL,
+    _ASSET_CATALOG_STATE_DDL,
+)
 
 _SCHEMA_V2 = (
     """
@@ -146,6 +193,8 @@ _SCHEMA_V2 = (
     _FEED_FALLBACKS_DDL,
 )
 
+_SCHEMA_V3 = (*_SCHEMA_V2, *_ASSET_SCHEMA)
+
 # v1 shipped a duplicate index over the sync_ranges primary key and stored
 # snapshot JSON in a WITHOUT ROWID table; v2 also adds feed_fallbacks.
 _MIGRATE_V1_TO_V2 = (
@@ -164,6 +213,7 @@ _MIGRATE_V1_TO_V2 = (
     _LATEST_SNAPSHOTS_INDEX_DDL,
     _FEED_FALLBACKS_DDL,
 )
+_MIGRATE_V2_TO_V3 = _ASSET_SCHEMA
 
 
 def resolve_db_path(
@@ -241,6 +291,62 @@ def _clean_namespace(value: Any, label: str) -> str:
     if not text:
         raise ValueError(f"{label} must not be empty")
     return text
+
+
+def asset_data_eligibility(asset: Mapping[str, Any]) -> tuple[bool, str | None]:
+    """Classify whether an Alpaca asset can be reconciled through Basic IEX bars."""
+    status = str(asset.get("status") or "").strip().lower()
+    asset_class = str(asset.get("class") or asset.get("asset_class") or "").strip().lower()
+    exchange = str(asset.get("exchange") or "").strip().upper()
+    symbol = str(asset.get("symbol") or "").strip().upper()
+    if status != "active":
+        return False, "inactive"
+    if asset_class != "us_equity":
+        return False, "unsupported_asset_class"
+    if not bool(asset.get("tradable")):
+        return False, "not_tradable"
+    if exchange == "OTC":
+        return False, "unsupported_iex_otc"
+    if exchange not in IEX_ELIGIBLE_EXCHANGES:
+        return False, "unsupported_exchange"
+    if not symbol or "," in symbol or any(char.isspace() for char in symbol):
+        return False, "unsafe_symbol_format"
+    return True, None
+
+
+def _normalize_asset_row(asset: Mapping[str, Any], seen_at: str) -> tuple[Any, ...]:
+    if not isinstance(asset, Mapping):
+        raise ValueError("asset catalog entry must be an object")
+    asset_id = str(asset.get("id") or asset.get("asset_id") or "").strip()
+    symbol = str(asset.get("symbol") or "").strip().upper()
+    if not asset_id or not symbol:
+        raise ValueError("asset catalog entry requires id and symbol")
+    normalized = {
+        **asset,
+        "symbol": symbol,
+        "class": str(asset.get("class") or asset.get("asset_class") or "").strip().lower(),
+        "exchange": str(asset.get("exchange") or "").strip().upper(),
+        "status": str(asset.get("status") or "").strip().lower(),
+    }
+    eligible, reason = asset_data_eligibility(normalized)
+    return (
+        asset_id,
+        symbol,
+        normalized["class"],
+        normalized["exchange"],
+        str(asset.get("name") or "").strip(),
+        normalized["status"],
+        int(bool(asset.get("tradable"))),
+        int(bool(asset.get("fractionable"))),
+        int(bool(asset.get("marginable"))),
+        int(bool(asset.get("shortable"))),
+        int(bool(asset.get("easy_to_borrow"))),
+        1,
+        int(eligible),
+        reason,
+        seen_at,
+        seen_at,
+    )
 
 
 def _first_present(data: Mapping[str, Any], *keys: str) -> Any:
@@ -466,9 +572,11 @@ class MarketDataStore:
         if version == SCHEMA_VERSION:
             return
         if version == 0:
-            statements = _SCHEMA_V2
+            statements = _SCHEMA_V3
         elif version == 1:
-            statements = _MIGRATE_V1_TO_V2
+            statements = (*_MIGRATE_V1_TO_V2, *_MIGRATE_V2_TO_V3)
+        elif version == 2:
+            statements = _MIGRATE_V2_TO_V3
         else:
             raise CacheSchemaError(f"no migration path from schema v{version}")
         try:
@@ -1105,6 +1213,157 @@ class MarketDataStore:
             for symbol in clean
         }
 
+    def replace_asset_catalog(
+        self,
+        assets: Iterable[Mapping[str, Any]],
+        *,
+        catalog: str = ASSET_CATALOG,
+        synced_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically replace the current full asset view without deleting history."""
+        catalog = _clean_namespace(catalog, "asset catalog")
+        synced_at = str(synced_at or self._now_text())
+        by_id: dict[str, tuple[Any, ...]] = {}
+        for asset in assets or []:
+            row = _normalize_asset_row(asset, synced_at)
+            by_id[str(row[0])] = row
+        if not by_id:
+            raise ValueError("asset catalog response must not be empty")
+        rows = list(by_id.values())
+        current_ids = set(by_id)
+        tradable_count = sum(int(row[6]) for row in rows)
+        eligible_count = sum(int(row[12]) for row in rows)
+        with self.connection() as conn, _transaction(conn):
+            previous_ids = {
+                str(row["asset_id"])
+                for row in conn.execute(
+                    "SELECT asset_id FROM assets WHERE is_current=1"
+                ).fetchall()
+            }
+            conn.execute(
+                """
+                UPDATE assets
+                SET is_current=0, data_eligible=0,
+                    excluded_reason='not_seen_in_latest_sync'
+                WHERE is_current=1
+                """
+            )
+            conn.executemany(
+                """
+                INSERT INTO assets (
+                    asset_id, symbol, asset_class, exchange, name, status,
+                    tradable, fractionable, marginable, shortable, easy_to_borrow,
+                    is_current, data_eligible, excluded_reason,
+                    first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(asset_id) DO UPDATE SET
+                    symbol=excluded.symbol,
+                    asset_class=excluded.asset_class,
+                    exchange=excluded.exchange,
+                    name=excluded.name,
+                    status=excluded.status,
+                    tradable=excluded.tradable,
+                    fractionable=excluded.fractionable,
+                    marginable=excluded.marginable,
+                    shortable=excluded.shortable,
+                    easy_to_borrow=excluded.easy_to_borrow,
+                    is_current=1,
+                    data_eligible=excluded.data_eligible,
+                    excluded_reason=excluded.excluded_reason,
+                    last_seen_at=excluded.last_seen_at
+                """,
+                rows,
+            )
+            state = {
+                "catalog": catalog,
+                "synced_at": synced_at,
+                "source_count": len(rows),
+                "current_count": len(rows),
+                "tradable_count": tradable_count,
+                "eligible_count": eligible_count,
+                "unsupported_count": len(rows) - eligible_count,
+            }
+            conn.execute(
+                """
+                INSERT INTO asset_catalog_state (
+                    catalog, synced_at, source_count, current_count,
+                    tradable_count, eligible_count, unsupported_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(catalog) DO UPDATE SET
+                    synced_at=excluded.synced_at,
+                    source_count=excluded.source_count,
+                    current_count=excluded.current_count,
+                    tradable_count=excluded.tradable_count,
+                    eligible_count=excluded.eligible_count,
+                    unsupported_count=excluded.unsupported_count
+                """,
+                (
+                    state["catalog"], state["synced_at"], state["source_count"],
+                    state["current_count"], state["tradable_count"],
+                    state["eligible_count"], state["unsupported_count"],
+                ),
+            )
+        return {
+            **state,
+            "new_count": len(current_ids - previous_ids),
+            "disappeared_count": len(previous_ids - current_ids),
+        }
+
+    def get_asset_catalog_state(
+        self, catalog: str = ASSET_CATALOG
+    ) -> dict[str, Any] | None:
+        catalog = _clean_namespace(catalog, "asset catalog")
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM asset_catalog_state WHERE catalog=?", (catalog,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def asset_catalog_is_fresh_today(self, catalog: str = ASSET_CATALOG) -> bool:
+        state = self.get_asset_catalog_state(catalog)
+        if not state:
+            return False
+        try:
+            synced = dt.datetime.fromisoformat(
+                str(state["synced_at"]).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            return False
+        if synced.tzinfo is None:
+            synced = synced.replace(tzinfo=dt.timezone.utc)
+        return synced.astimezone(dt.timezone.utc).date() == self.now_utc().date()
+
+    def get_asset_symbols(self, *, data_eligible: bool = True) -> list[str]:
+        clause = "AND data_eligible=1" if data_eligible else ""
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT symbol FROM assets
+                WHERE is_current=1 {clause}
+                ORDER BY symbol
+                """
+            ).fetchall()
+        return [str(row["symbol"]) for row in rows]
+
+    def get_asset_exclusion_counts(self) -> dict[str, int]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT COALESCE(excluded_reason, 'eligible') AS reason, count(*) AS count
+                FROM assets WHERE is_current=1
+                GROUP BY COALESCE(excluded_reason, 'eligible') ORDER BY reason
+                """
+            ).fetchall()
+        return {str(row["reason"]): int(row["count"]) for row in rows}
+
+    def get_assets(self, *, current_only: bool = True) -> list[dict[str, Any]]:
+        clause = "WHERE is_current=1" if current_only else ""
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM assets {clause} ORDER BY symbol, asset_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_feed_fallback(self, requested_feed: str) -> str | None:
         requested_feed = _clean_namespace(requested_feed, "requested feed")
         with self.connection() as conn:
@@ -1199,6 +1458,7 @@ class MarketDataStore:
 
 
 __all__ = [
+    "ASSET_CATALOG",
     "CacheBusyError",
     "CacheSchemaError",
     "DEFAULT_DB_PATH",
@@ -1206,6 +1466,7 @@ __all__ = [
     "MarketDataStore",
     "MarketDataCacheError",
     "SCHEMA_VERSION",
+    "asset_data_eligibility",
     "merge_date_ranges",
     "missing_date_ranges",
     "resolve_db_path",

@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from .account_overlay import _account_overlay
-from .constants import ALPHA_WEIGHTS, CONFIRMATION_MIN
+from .constants import ALPHA_WEIGHTS, CONFIRMATION_MIN, RECOVERY_POSITION_CAP_PCT
 from .factors import FACTOR_FNS, _f_technical, _f_volume_exec
 from .gates import (
     _confirmation_ok,
@@ -80,6 +80,7 @@ def score(
     # 不改 composite（保持 IC 校准的排名分），只作用于 verdict/action/交易计划。
     timing = a.get("entry_timing") or {}
     timing_class = timing.get("classification")
+    bounce = timing.get("bounce") or {}
     timing_reasons: list[str] = []
     # 拐点入场的替代确认：波动确认仍须达标（反弹要有参与度），趋势热度类确认
     # （technical/trend_quality）在回调转折处定义性偏低，由反转触发信号替代。
@@ -87,6 +88,42 @@ def score(
     # 必须明确可算且达标，否则维持观察。
     vol_min_ok = vol_s is not None and vol_s >= CONFIRMATION_MIN["volume"]
     pullback_entry_ok = timing_class == "pullback_reversal" and vol_min_ok
+    ma_data = a.get("ma") or {}
+    weekly = a.get("weekly") or {}
+    recovery_entry_ok = bool(
+        timing_class == "recovery_reversal"
+        and ma_data.get("MA200_rising") is True
+        and weekly.get("bearish_alignment") is False
+        and not core_data_reasons
+        and not llm_reasons
+    )
+    overextended_reversal = bool(
+        timing_class == "overextended"
+        and bounce.get("up_day") is False
+        and isinstance(bounce.get("close_strength"), (int, float))
+        and bounce["close_strength"] <= 0.45
+        and bounce.get("macd_hist_rising") is False
+        and isinstance(bounce.get("vol_ratio_vs_ma20"), (int, float))
+        and bounce["vol_ratio_vs_ma20"] >= 0.8
+    )
+    trend_break_exit = bool(
+        ma_data.get("above_MA60") is False
+        and ma_data.get("MA60_rising") is False
+    )
+    if overextended_reversal:
+        position_exit = {
+            "action": "exit_next_open",
+            "classification": "overextended_reversal",
+            "reason": "过热后出现放量弱收盘，下一交易日开盘保护利润",
+        }
+    elif trend_break_exit:
+        position_exit = {
+            "action": "exit_next_open",
+            "classification": "trend_break",
+            "reason": "价格跌破下行 MA60，下一交易日开盘退出",
+        }
+    else:
+        position_exit = {"action": "hold", "classification": "none"}
 
     # 先计算原三层结论，再让第四层做单向过热降级或受约束的拐点替代。
     # 显式保留 base_verdict，供 forward log 对第四层做 A/B，避免只看到最终结果。
@@ -104,7 +141,12 @@ def score(
         base_verdict, base_action = "否", "回避"
 
     verdict, action = base_verdict, base_action
-    if base_verdict == "是" and timing_class == "overextended":
+    if recovery_entry_ok:
+        verdict, action = "是", "高置信超跌反转试仓（受限仓位，结构低点止损）"
+        timing_reasons.append(
+            "高置信超跌反转：深度回撤后出现放量强反转，长期均线仍上行且周线未空头排列——允许受限试仓"
+        )
+    elif base_verdict == "是" and timing_class == "overextended":
         verdict, action = "观察", "观察等待（入场时机过热，等回踩计划价）"
         ext = timing.get("ext_atr_above_ma20")
         r14 = timing.get("rsi14")
@@ -121,9 +163,16 @@ def score(
     ):
         verdict, action = "是", "回调拐点入场（分批，反转触发替代趋势热度确认）"
 
-    blocking_reasons = plan_blocking + timing_reasons
+    effective_plan_blocking = (
+        llm_reasons + core_data_reasons if recovery_entry_ok else plan_blocking
+    )
+    blocking_reasons = effective_plan_blocking + timing_reasons
     suggested_position = _position_pct(a, composite)
-    trade_plan = _trade_plan(a, verdict, plan_blocking, confirmation_ok, timing_class)
+    if recovery_entry_ok and suggested_position is not None:
+        suggested_position = min(suggested_position, RECOVERY_POSITION_CAP_PCT)
+    trade_plan = _trade_plan(
+        a, verdict, effective_plan_blocking, confirmation_ok, timing_class
+    )
     account_overlay, account_verdict, account_action = _account_overlay(
         a, verdict, suggested_position, trade_plan, account_context
     )
@@ -151,6 +200,7 @@ def score(
         "entry_timing": ({              # 入场时机层回显：分类与时机分（详情在分析对象）
             "classification": timing_class,
             "timing_score_pct": timing.get("timing_score_pct"),
+            "recovery_entry": recovery_entry_ok,
         } if timing else None),
         "risk_gates": gate_reasons,
         "blocking_reasons": blocking_reasons,  # 面向输出：价格/趋势闸门 + 新闻面降级原因
@@ -161,6 +211,7 @@ def score(
             **llm_echo,                         # catalyst / data_trust / red_flags（仅回显）
         } if llm_context is not None else None),
         "suggested_position_pct": suggested_position,
+        "position_exit": position_exit,
         "trade_plan": trade_plan,
         "account_overlay": account_overlay,
         "data_flags": _flags(a, alpha_subs),

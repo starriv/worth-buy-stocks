@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import forward_log as F  # noqa: E402
+import scoring as S  # noqa: E402
 
 
 def _rec(run_date, symbol, verdict="是", last_close=100.0, version="v1.0", **kw):
@@ -16,6 +17,10 @@ def _rec(run_date, symbol, verdict="是", last_close=100.0, version="v1.0", **kw
 
 
 class TestMergeRecords(unittest.TestCase):
+    def test_model_version_uses_scoring_single_source(self):
+        self.assertEqual(F.MODEL_VERSION, S.MODEL_VERSION)
+        self.assertEqual(S.MODEL_VERSION, "v1.2")
+
     def test_same_day_rerun_overwrites(self):
         old = [_rec("2026-07-09", "AAPL", composite=70.0)]
         new = [_rec("2026-07-09", "AAPL", composite=81.0)]

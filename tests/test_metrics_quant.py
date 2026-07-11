@@ -139,6 +139,28 @@ class TestEntryTiming(unittest.TestCase):
         timing = M.entry_timing(closes, highs, lows, volumes)
         self.assertEqual(timing["classification"], "trend_broken")
 
+    def test_deep_high_volume_reversal_is_recovery_candidate(self):
+        closes = [100.0 + 0.1 * i for i in range(230)]
+        closes += [123, 124, 125, 126, 127, 128, 129, 130, 129, 128,
+                   126, 123, 120, 117, 113, 109, 104, 99, 95, 106]
+        highs, lows, volumes = self._ohlcv(closes)
+        lows[-1] = 95.5
+        highs[-1] = 107.0
+        volumes[-1] = 2_500_000
+        timing = M.entry_timing(closes, highs, lows, volumes)
+        self.assertEqual(timing["classification"], "recovery_reversal")
+        self.assertTrue(timing["bounce"]["recovery_hard_pass"])
+
+    def test_deep_reversal_without_volume_stays_broken(self):
+        closes = [100.0 + 0.1 * i for i in range(230)]
+        closes += [123, 124, 125, 126, 127, 128, 129, 130, 129, 128,
+                   126, 123, 120, 117, 113, 109, 104, 99, 95, 106]
+        highs, lows, volumes = self._ohlcv(closes, last_volume=1_000_000)
+        lows[-1] = 95.5
+        highs[-1] = 107.0
+        timing = M.entry_timing(closes, highs, lows, volumes)
+        self.assertEqual(timing["classification"], "trend_broken")
+
 
 class TestATR(unittest.TestCase):
     def test_constant_range(self):

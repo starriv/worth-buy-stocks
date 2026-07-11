@@ -2,11 +2,12 @@
 
 `worth-buy-stocks` 的脚本层维护文档。这里说明运行链路、评分规则、模块边界和验证方式；使用说明见[根目录 README](../README.md)，Codex 执行约束见 [SKILL.md](../SKILL.md)。
 
-运行时以 Python 标准库和本机 Alpaca CLI 为主。Finnhub、Claude API 和 Telegram 都是可选能力，其中 Claude API 额外依赖官方 `anthropic` SDK。
+运行时以 Python 标准库、本机 Alpaca CLI 和强制依赖 `structlog==26.1.0` 为主。Finnhub、Claude API 和 Telegram 都是可选能力，其中 Claude API 额外依赖官方 `anthropic` SDK。
 
 ## 导航
 
 - [运行约束](#运行约束)
+- [统一日志](#统一日志)
 - [运行架构](#运行架构)
 - [评分引擎](#评分引擎)
 - [指标计算](#指标计算)
@@ -28,6 +29,20 @@
 | 日线口径稳定 | 默认使用 `iex`；SQLite 只向评分提供 final rows，盘中 live/Snapshot 单独展示 |
 
 `indicators.py` 保留旧版再导出，已有的 `import indicators as I` 仍可使用。新增逻辑应放到职责对应的模块，不继续扩大 CLI 文件。
+
+## 统一日志
+
+`skill_logging.py` 是唯一日志门面。CLI 入口调用 `add_logging_arguments()` 和 `configure_logging()`；业务模块只调用 `get_logger()`/`logger.bind()`，不得自行配置 handler、直接写 stderr 或调用 root `logging.*`。
+
+- stdout：JSON artifact、终端 K 线、回测与 forward-log 报告。
+- stderr：运行生命周期、progress/heartbeat、降级告警与异常。
+- `--log-format auto`：TTY 使用 console，非 TTY 使用 JSONL；可显式指定 `console|json`。
+- `--log-level`：`DEBUG|INFO|WARNING|ERROR`，默认 INFO。
+- 环境变量：`WORTH_BUY_STOCKS_LOG_FORMAT`、`WORTH_BUY_STOCKS_LOG_LEVEL`；CLI 优先。
+- JSONL 最小字段：UTC `timestamp`、`level`、snake_case `event`、`worth_buy_stocks.*` `logger`；其余使用低基数上下文字段。
+- processor 会递归脱敏 key/secret/token/authorization/cookie/password/credential 以及 URL/header/异常文本中的常见凭证形式。禁止把完整 artifact、账户对象、环境或请求头主动传给 logger。
+
+`cache_admin` 的长任务 progress 与 heartbeat 也走同一门面：重定向 stderr 时每个非空行都是独立 JSON，对 stdout 最终 summary 无影响。静态测试 `tests/test_logging_guard.py` 阻止 raw stderr、root logger、自写 JSON 日志和绕过 facade 的 `structlog` 调用重新进入业务代码。
 
 ## 运行架构
 
@@ -179,11 +194,12 @@ score = 1 / (1 + e^(-k × (x - x0)))
 |---|---|---|
 | `overextended` | 距 MA20 ≥ 3 ATR，或 RSI14 ≥ 80，或软阈值同时满足 | 将基础 `是` 降为 `观察`，给出回踩价 |
 | `pullback_reversal` | 趋势仍有效，先高后低形成回调，完成日线反转，且至少两个独立触发信号 | 可替代 technical / trend_quality 确认；volume 必须明确达标 |
+| `recovery_reversal` | 结构回撤至少 12%，反转日涨幅/强收盘/量能/多重确认全部达标，且长期均线仍上行 | 不改排名分；允许最多 15% 独立试仓，结构低点止损 |
 | `pullback_no_trigger` | 已回调但反转信号不足 | 保持原结论 |
 | `trend_continuation` | 趋势正常推进且未过热 | 保持原结论 |
 | `trend_broken` | 中期趋势结构破坏 | 交给趋势闸门处理 |
 
-时机阈值属于 v1.1 的待验证参数。`forward_log.py` 会记录介入前结论和时机分类，跨模型版本不得混算。
+时机阈值属于 v1.2 的待验证参数。`forward_log.py` 会记录介入前结论和时机分类，跨模型版本不得混算。
 
 ### 仓位、计划与账户
 
@@ -193,7 +209,7 @@ score = 1 / (1 + e^(-k × (x - x0)))
 仓位比例 = min(20% / 3 个月年化波动率, 1) × composite / 100
 ```
 
-`trade_plan.py` 使用 ATR14、MA60 和近 30 日结构生成入场、回踩、突破、追价上限、保护价、2R / 3R 止盈和移动止损。账户上下文不改 `composite`，但可以把最终结论调整为 `持仓需减风险`。
+`trade_plan.py` 使用 ATR14、MA60 和近 30 日结构生成入场、回踩、突破、追价上限、保护价、2R / 3R 止盈和移动止损；超跌反转使用结构低点止损与至少 10% 的延迟移动保护。managed 回测执行建议仓位，达到 1R 后转保本并激活移动保护。账户上下文不改 `composite`，但可以把最终结论调整为 `持仓需减风险`。
 
 ### 可选上下文
 
@@ -224,9 +240,11 @@ AI 意见载荷采用字段白名单，输入中不含 `verdict`、`composite` �
 
 | 脚本 | 用途 | 方法 |
 |---|---|---|
-| `backtest_factor_ic.py` | 检查单因子方向 | 截面 Spearman IC |
-| `backtest_score.py` | 检查综合评分与确认层 | 分桶、五分位价差、截面 IC、确认层 A/B |
-| `backtest_robustness.py` | 检查结果稳定性 | 非重叠窗口、regime / 行业中性拆分、bootstrap CI、幸存者探针 |
+| `backtest.py factor-ic` | 检查单因子方向 | 截面 Spearman IC |
+| `backtest.py score` | 检查综合评分与确认层 | 分桶、五分位价差、截面 IC、确认层 A/B |
+| `backtest.py robustness` | 检查结果稳定性 | 非重叠窗口、regime / 行业中性拆分、bootstrap CI、幸存者探针 |
+| `backtest.py single` | 检查单标的历史时序证据 | point-in-time 评分、21/63 日研究窗口、计划仓位 managed 持仓保护、自包含 HTML |
+| `backtest.py render` | 重建可视化报告 | 校验 canonical artifact 后只做展示，不重算研究指标 |
 | `forward_log.py` | 积累样本外记录 | 固化当日评分，满 63 个交易日后按结论和时机分类对账 |
 
 使用 Spearman 是因为评分关注排序，且秩相关不易被单只股票的极端收益主导。采用截面 IC 是为了减少市场整体涨跌对结果的干扰。
@@ -240,6 +258,8 @@ AI 意见载荷采用字段白名单，输入中不含 `verdict`、`composite` �
 - logistic 参数、确认阈值、封顶值和结论分界仍含手工自由度。
 
 因此，`composite` 用于统一执行纪律和风险过滤，不应解释为已经验证的宽票池选股 alpha。完整参数、证据与版本记录见 [Model Card](../docs/model-card.md)。
+
+单标的回测与上述横截面校准互补，不替代它。它严格对 TICKER、SPY、QQQ 按每个信号时点切片后调用生产 `pipeline.build_result()`；SPY/QQQ 作为研究标的时排除自身相对强度基准。事件研究的重叠样本只做描述，自动判断只使用非重叠推断样本。仿真在信号后的下一交易日开盘执行，比较 rank-only 与 disciplined-verdict 的 21/63 日研究窗口，以及执行建议仓位、初始止损、1R 保本、移动保护和下一开盘信号退出的 managed 场景。详细定义见[回测契约](../docs/backtesting-contract.md)。
 
 ## 模块职责
 
@@ -266,54 +286,70 @@ AI 意见载荷采用字段白名单，输入中不含 `verdict`、`composite` �
 | `scanner.py` | 全市场扫描、流动性初筛、两轮评分和新闻复核 |
 | `chart.py` | 终端 K 线、自包含 HTML 图和计划价位线 |
 | `notify_telegram.py` | Telegram 文本推送 |
-| `backtest_common.py` / `backtest_*.py` | 历史面板、统计原语和三类回测 |
+| `backtesting/data.py` | 单标的 `cache-only` / `auto` / `input` 数据边界、coverage、final-only 与数据指纹 |
+| `backtesting/replay.py` | point-in-time 生产评分回放与结构化 timeline |
+| `backtesting/event_study.py` / `statistics.py` | 21/63 日事件研究、非重叠推断、IC 与循环块 bootstrap CI |
+| `backtesting/simulation.py` | 下一开盘、固定研究窗口、managed 基线及 stateful 恢复/再入场实验、成本、账本、权益、回撤和基准 |
+| `backtesting/artifact.py` / `visualization.py` | canonical artifact、语义 hash、原子写入与只读自包含 HTML |
+| `backtesting/panel.py` | 宽票池历史 Panel、前瞻收益与 cache-backed loader |
+| `backtesting/cross_sectional.py` / `universe.py` | 三类宽票池研究循环与冻结票池 |
+| `backtest.py` | 唯一回测 CLI；横截面研究、单标的验证与 artifact 重渲染 |
 | `forward_log.py` | 按模型版本记录和评估前瞻结果 |
+| `skill_logging.py` | structlog 配置、console/JSONL renderer、上下文与凭证脱敏 |
 | `utils.py` | 通用数值归一化工具 |
+| `../Makefile` | 公共 CLI 的薄转发层、变量约定、长任务分流与 purge guard |
 
 ## 常用命令
 
-以下命令均从仓库根目录运行。完整环境配置见[本地环境设置](../references/setup.md)。
+以下命令均从仓库根目录运行。`make help` 是日常使用的权威索引；完整环境配置见[本地环境设置](../references/setup.md)。Makefile 使用静默 recipe，不会污染脚本 stdout。常用变量包括 `PYTHON`、`CACHE_DB`、`FEED`、`SYMBOLS`、`SYMBOL`、`START`、`END`、`DATA_SOURCE`、`COST_BPS`、`YEARS`、`WORKERS`、`BATCH_SIZE`、`MAX_RPM` 和 `MAX_RUNTIME`。
+
+`ARGS` 原样追加到具体子命令之后，例如 `ARGS="--symbols-file canary.txt"`；`GLOBAL_ARGS` 放在 subcommand 之前，例如 `GLOBAL_ARGS="--log-format console --log-level DEBUG"`。没有 subcommand 的 CLI 两者都作为普通附加参数。新增公共 CLI 时同步 Make target 和 `tests/test_makefile.py`，不要把业务逻辑搬进 Makefile。
+
+```bash
+make help
+make doctor
+make check PYTHON=python3
+```
 
 ### 运行与展示
 
 ```bash
 # 单股评分；账户、Finnhub、Snapshot 和 AI 意见默认按本地配置自动启用
-python3 scripts/indicators.py --symbols AAPL,SPY,QQQ --feed iex --adjustment split
+make analyze SYMBOLS=AAPL,SPY,QQQ
 
 # 加入手工新闻风险上下文
-python3 scripts/indicators.py --symbols AAPL,SPY,QQQ \
-  --llm-context-file news_context.json
+make analyze SYMBOLS=AAPL,SPY,QQQ ARGS="--llm-context-file news_context.json"
 
 # 全市场扫描；可用 --entry pullback 只保留回调拐点
-python3 scripts/scanner.py --feed iex --top 20
+make scan TOP=20 ARGS="--entry pullback"
 
 # 缓存默认 auto；可显式刷新或关闭，也可覆盖 DB 路径
-python3 scripts/indicators.py --symbols AAPL,SPY,QQQ --cache refresh
-python3 scripts/scanner.py --symbols AAPL,MSFT --cache off
+make analyze SYMBOLS=AAPL,SPY,QQQ ARGS="--cache refresh"
+make scan ARGS="--symbols AAPL,MSFT --cache off"
 
 # 生成带计划价位线的终端 K 线和 HTML 图
-python3 scripts/indicators.py --symbols AAPL,SPY,QQQ > result.json
-python3 scripts/chart.py --symbol AAPL --plan result.json --html
+make analyze SYMBOLS=AAPL,SPY,QQQ > result.json
+make chart SYMBOL=AAPL PLAN=result.json
 
 # 推送已有摘要
-printf '%s' "结论文本" | python3 scripts/notify_telegram.py
+make notify NOTIFY_FILE=summary.txt
 ```
 
 ### 离线复盘
 
 ```bash
 # 从文件读取 multi-bars JSON，不触网
-python3 scripts/indicators.py --input bars.json --symbols AAPL,SPY,QQQ
+make analyze SYMBOLS=AAPL,SPY,QQQ ARGS="--input bars.json"
 
 # 注入离线 overlay；其他文件还支持 finnhub / snapshot / ai_opinion
-python3 scripts/indicators.py --input bars.json --symbols AAPL,SPY,QQQ \
-  --account-context-file account_context.json
+make analyze SYMBOLS=AAPL,SPY,QQQ \
+  ARGS="--input bars.json --account-context-file account_context.json"
 
 # 离线扫描
-python3 scripts/scanner.py --input scan_fixture.json --verify-news off
+make scan ARGS="--input scan_fixture.json --verify-news off"
 
 # 用离线 bars 画图
-python3 scripts/chart.py --input bars.json --symbol AAPL --count 30
+make chart SYMBOL=AAPL ARGS="--input bars.json"
 ```
 
 `--input` 是硬离线边界：不访问 SQLite，不触发 Alpaca、Finnhub、账户、AI 或通知；只读取输入 JSON 和显式 context 文件。
@@ -323,39 +359,73 @@ python3 scripts/chart.py --input bars.json --symbol AAPL --count 30
 默认路径为 skill 根目录 `data/market-data.sqlite3`；可设置 `WORTH_BUY_STOCKS_DB`，或在支持的 CLI 上使用 `--cache-db`。网络请求不持有写事务；scanner worker 使用独立连接，SQLite 使用 WAL 与 busy timeout。
 
 ```bash
-python3 scripts/cache_admin.py status
-python3 scripts/cache_admin.py integrity-check
-python3 scripts/cache_admin.py warm --symbols AAPL,SPY,QQQ
-python3 scripts/cache_admin.py refresh --symbols AAPL,SPY,QQQ --start 2025-01-01
-python3 scripts/cache_admin.py purge --symbols AAPL --start 2026-07-01 --end 2026-07-10
-python3 scripts/cache_admin.py purge --all
+make status
+make integrity
+make cache-warm SYMBOLS=AAPL,SPY,QQQ
+make cache-refresh SYMBOLS=AAPL,SPY,QQQ START=2025-01-01
+make warm-market-plan
+make warm-market YEARS=3 WORKERS=4 BATCH_SIZE=50 MAX_RPM=120 MAX_RUNTIME=3600
+make sync-assets
+make reconcile-plan
+make reconcile-market YEARS=3 WORKERS=4 BATCH_SIZE=50 MAX_RPM=120 MAX_RUNTIME=3600
+make cache-purge PURGE_SYMBOLS=AAPL START=2026-07-01 END=2026-07-10
+make cache-purge-all CONFIRM=purge-all
 ```
 
 `status`/`integrity-check` 不创建或迁移缺失数据库。`purge` 无 symbol、完整日期范围或显式 `--all` 时拒绝执行；范围清理会同步切开 coverage，下一次 `auto` 只补被清理的缺口。
 
+`warm-market` 每次只发现一次 NYSE/NASDAQ active scanner universe，以 `sync_ranges` 过滤完整覆盖并按真实缺口组批。默认最近 3 年、4 workers、50 symbols/batch；所有 `multi-bars` pages（含失败和重试）共享 120 RPM 均匀预算，不会因增加 workers 而放宽，429 会触发 job-wide cooldown。默认数据库仍是 skill 根目录 `data/market-data.sqlite3`；同一路径的第二实例退出 4。
+
+先用 `--dry-run` 查看 `universe/covered/pending/pending_ranges/batches/estimated_rows`，其 bars pages 必须为 0。实际运行的进度/心跳写 stderr，stdout 最终只输出 JSON；完成或 dry-run 退出 0，可恢复 partial 退出 3，参数错误退出 2，致命错误退出 1，SIGINT 安全收敛后退出 130。`--symbols-file` 跳过 asset discovery 并标记 `scope_limited`，适合以 `--max-rpm 30` 做 canary。该预算只约束本进程；Alpaca Basic 200 RPM 下仍须避免其他客户端同时高频调用。
+
+schema v3 新增 `assets` 和 `asset_catalog_state`。`sync-assets` 每个 UTC 日期默认只调用一次 Alpaca 资产列表；资产按稳定 ID upsert，当前响应外的旧资产只设为 `is_current=0`，不会删除。目录同时保存交易/融券/碎股属性、交易所、首次/最后发现时间、是否可做 IEX 行情对账及排除原因。
+
+`reconcile-market` 从当前资产目录选择 `active + us_equity + tradable` 且交易所为 AMEX/ARCA/BATS/NASDAQ/NYSE 的 symbol，排除 Basic IEX 不支持的 OTC，再复用 warm-market 的 coverage planner、page limiter、retry、锁与退出码。合法空历史区间可以形成 coverage；是否实际存在 bar 另行在摘要中报告。`status` 会显示目录 freshness、目录排除计数和三年 `eligible/covered/pending`，所以低速 canary 不会被误报为全市场完整。
+
 ### 回测与前瞻日志
 
 ```bash
-python3 scripts/backtest_factor_ic.py
-python3 scripts/backtest_score.py
-python3 scripts/backtest_robustness.py
+make backtest-factor
+make backtest-score
+make backtest-robustness
 
-python3 scripts/forward_log.py record
-python3 scripts/forward_log.py evaluate
+# 对应的唯一 Python CLI
+python3 scripts/backtest.py factor-ic
+python3 scripts/backtest.py score
+python3 scripts/backtest.py robustness
+
+# 默认 cache-only；生成 artifacts/backtests/*.json 与 *.html
+make backtest-visual SYMBOL=AAPL START=2021-07-01 END=2026-07-09
+
+# 显式离线 fixture；不访问 SQLite 或网络
+python3 scripts/backtest.py single --symbol AAPL \
+  --start 2021-01-04 --end 2025-12-31 \
+  --data-source input --input bars.json
+
+# canonical JSON 是事实源，可独立重建 HTML
+python3 scripts/backtest.py render \
+  --artifact artifacts/backtests/<artifact>.json \
+  --html artifacts/backtests/rerendered.html
+
+make forward-record
+make forward-evaluate
 ```
+
+`cache-only` 是严格可复现研究的默认值：数据库以 SQLite URI `mode=ro` 打开并启用 `query_only`，只读取 schema v3 的 `daily_bars` / `sync_ranges` / `market_sessions`，不调用 transport。周末、休市日、未完成 session 或未来的 requested end 只按缓存日历截到最近完成 session；已完成 session 的 coverage 缺口仍失败。`auto` 只在操作者显式选择时复用现有 read-through。成功 artifact 固定记录 contract、artifact 与 model version、参数、请求/实际区间、coverage、data hash、timeline、事件研究、仿真、基准、警告和 validation status；相同语义输入的 `semantic_hash` 稳定，生成时间与数据库绝对路径不参与该 hash。
 
 ### 测试与契约校验
 
 ```bash
-python3 -m pytest tests/
-python3 scripts/validate_agent_contract.py --kind result result.json
+make test
+make contract KIND=result ARTIFACT=result.json
+make check
 ```
 
 ## 修改与验证
 
 - 修改权重或阈值：更新 `scoring/constants.py`、`scoring/factors.py` 或 `scoring/gates.py`，同步更新 Model Card 的版本、动机和证据。
 - 修改计划价：更新 `scoring/trade_plan.py`；修改账户处理规则：更新 `scoring/account_overlay.py`。
-- 修改回测篮子或窗口：更新 `backtest_common.py`，保留前后口径说明。
+- 修改宽票池回测篮子：更新 `backtesting/universe.py`；修改横截面取数/Panel：更新 `backtesting/panel.py`；修改单标的研究窗口、样本下限或执行语义：先更新 `backtesting/contracts.py` 与 `docs/backtesting-contract.md`，保留前后口径说明。
 - 修改 artifact 结构：先更新 `references/agent-contracts.md`，再更新 `agent_contracts.py` 和对应测试。
 - 新增纯计算：在 `metrics.py` 或 `scoring/` 中实现，并补 `tests/test_*.py`。
 - 新增外部数据源：放入独立适配模块，明确失败降级方式，避免让网络状态渗入纯计算层。
@@ -364,8 +434,5 @@ python3 scripts/validate_agent_contract.py --kind result result.json
 提交前至少执行：
 
 ```bash
-python3 -m pytest tests/
-python3 scripts/indicators.py --help
-python3 scripts/scanner.py --help
-git diff --check
+make check
 ```

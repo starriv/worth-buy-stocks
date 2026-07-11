@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""回测统计原语的单元测试（backtest_common：秩相关 / 分桶 / 五分位）。
+"""回测正式模块的统计、票池、Panel 与因子特征测试。
 
 这些纯函数过去内嵌在回测脚本里、无测试；并列秩与零方差等边界最易出错。
 不触网（不调用 load_panel）。
@@ -10,8 +10,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
-import backtest_common as B  # noqa: E402
-import backtest_factor_ic as BF  # noqa: E402
+from backtesting import statistics as B  # noqa: E402
+from backtesting.cross_sectional import factor_features  # noqa: E402
+from backtesting.panel import Panel  # noqa: E402
+from backtesting.universe import ALIVE, BANKRUPT, DELISTED, SECTOR, UNIVERSE  # noqa: E402
 
 
 class TestRanks(unittest.TestCase):
@@ -118,20 +120,20 @@ class TestSectorDemean(unittest.TestCase):
 
 class TestUniverseRules(unittest.TestCase):
     def test_every_universe_symbol_has_sector(self):
-        missing = [s for s in B.UNIVERSE if s not in B.SECTOR]
+        missing = [s for s in UNIVERSE if s not in SECTOR]
         self.assertEqual(missing, [])
 
     def test_basket_size_and_sector_coverage(self):
-        self.assertGreaterEqual(len(B.ALIVE), 120)
+        self.assertGreaterEqual(len(ALIVE), 120)
         sectors = {}
-        for s in B.ALIVE:
-            sectors.setdefault(B.SECTOR[s], []).append(s)
+        for s in ALIVE:
+            sectors.setdefault(SECTOR[s], []).append(s)
         self.assertGreaterEqual(len(sectors), 10)
         for name, syms in sectors.items():
             self.assertGreaterEqual(len(syms), 7, f"行业 {name} 票数不足")
 
     def test_bankrupt_is_subset_of_delisted(self):
-        self.assertTrue(B.BANKRUPT.issubset(set(B.DELISTED)))
+        self.assertTrue(BANKRUPT.issubset(set(DELISTED)))
 
 
 class TestPanelReturns(unittest.TestCase):
@@ -147,7 +149,7 @@ class TestPanelReturns(unittest.TestCase):
                 {"t": "2026-01-02T00:00:00Z", "c": 50},
             ],
         }
-        panel = B.Panel(bars, "iex", "split")
+        panel = Panel(bars, "iex", "split")
         self.assertEqual(panel.fwd_return_pct("AAPL", 0, 2), -50.0)
 
     @staticmethod
@@ -161,7 +163,7 @@ class TestPanelReturns(unittest.TestCase):
                 {"t": "2026-01-03T00:00:00Z", "c": 60},
             ],
         }
-        return B.Panel(bars, "iex", "split")
+        return Panel(bars, "iex", "split")
 
     def test_bankrupt_symbol_counts_as_total_loss_after_halt(self):
         panel = self._panel_with_halted("SIVB")  # SIVB ∈ BANKRUPT
@@ -205,7 +207,7 @@ class TestFactorICFeatures(unittest.TestCase):
                 "composite": 75,
             },
         }
-        feats = BF._features(row)
+        feats = factor_features(row)
         self.assertEqual(feats["trend"], 100)
         self.assertEqual(feats["trend_quality"], 55)
 

@@ -1,6 +1,6 @@
 ---
 name: worth-buy-stocks
-description: "Evaluate whether a US stock is worth buying, holding, reducing, avoiding, or watchlisting under the user's Alpaca-based trend-following and relative-strength framework, with news/event-risk overlay, read-only account exposure overlay, display-only AI second opinion, whole-market scanning, and optional multi-agent evidence collection via stable JSON contracts. Use when the user asks 值得买吗, 股票评分, buy/hold/sell/avoid/watchlist, Alpaca 行情或持仓, account exposure, 全市场扫描/找今天能买的, multi-agent stock analysis, 并行采集, agent contracts, 入场价/出场价/止盈止损, 30 天行情, 当日行情, 新闻面/事件风险, AI 意见/AI 分析对比, 交易纪律, 趋势跟随, 相对强度, 主升趋势, 修正阶段, momentum leadership, 量价确认, 顶背离, or 超买超卖."
+description: "Evaluate whether a US stock is worth buying, holding, reducing, avoiding, or watchlisting under the user's Alpaca-based trend-following and relative-strength framework, with news/event-risk overlay, read-only account exposure overlay, display-only AI second opinion, whole-market scanning, SQLite market-data caching, a persistent Alpaca asset catalog, safe historical warmup and coverage reconciliation, and optional multi-agent evidence collection via stable JSON contracts. Use when the user asks 值得买吗, 股票评分, buy/hold/sell/avoid/watchlist, Alpaca 行情或持仓, account exposure, 全市场扫描/找今天能买的, 行情缓存/历史数据预热/全市场三年数据/资产目录/查漏补缺, multi-agent stock analysis, 并行采集, agent contracts, 入场价/出场价/止盈止损, 30 天行情, 当日行情, 新闻面/事件风险, AI 意见/AI 分析对比, 交易纪律, 趋势跟随, 相对强度, 主升趋势, 修正阶段, momentum leadership, 量价确认, 顶背离, or 超买超卖."
 ---
 
 # 值得买 - 股票版
@@ -20,7 +20,7 @@ description: "Evaluate whether a US stock is worth buying, holding, reducing, av
 
 数据角色：Alpaca 价量是主证据；新闻/公告默认作为事件风险 overlay；Alpaca 持仓默认作为只读敞口 overlay；Finnhub 是可选补充（quote 交叉校验、公司新闻、财报日历、元数据），不得替代 Alpaca 主链路。AI 意见（脚本内置调用 Claude API 生成）默认作为对照展示 overlay：只用于让用户对比"量价纪律结论 vs AI 判断"，不参与评分、不触发降级、不可用于升级或改写结论；不可用时如实写"无法确认"，不得编造或自行补写 AI 意见。
 
-框架取向：只参与趋势延续、相对强度领先，以及**强趋势内的回调拐点**（趋势与相对强度资格完好、回调后出现放量反转触发）；回避弱势修复（趋势破坏后的均值回归）、过热追高末端和估值叙事。入场时机层由脚本判定：过热只降级、拐点触发可替代趋势热度确认，均不改排名分。
+框架取向：主路径参与趋势延续、相对强度领先和**强趋势内的回调拐点**；独立恢复路径只处理深度回撤后的高置信放量强反转，保持排名分原值并将试仓封顶 15%。普通弱势修复、过热追高末端和估值叙事继续回避。持仓保护在达到 1R 后转保本与移动止损，高位反转或有效趋势破位按下一开盘退出。
 
 ## 环境检查
 
@@ -40,6 +40,10 @@ SKILL_DIR="$HOME/.codex/skills/worth-buy-stocks"
 FEED="iex"
 ```
 
+首次运行先确认 Python 3.10+ 并安装强制依赖：`python3 -m pip install -r "$SKILL_DIR/requirements.txt"`。所有脚本保持 stdout 为结果/图表通道，运行日志只写 stderr；stderr 被捕获或重定向时默认是 JSONL，可用 `--log-format console|json` 和 `--log-level DEBUG|INFO|WARNING|ERROR` 覆盖。
+
+从 skill 根目录进行人工运维时，先用 `make help` 查看统一入口；常用 target 包括 `analyze`、`scan`、`status`、`sync-assets`、`warm-market-plan`、`reconcile-plan`、回测研究与 `check`。全部回测 Python 命令统一走 `scripts/backtest.py`（`factor-ic`、`score`、`robustness`、`single`、`render`）；Makefile 只做薄转发，保持 stdout、限速和退出码契约。高级子命令参数通过 `ARGS` 传入，全局日志参数通过 `GLOBAL_ARGS` 传入。完整预热和 reconcile target 不得由默认目标或收尾流程自动调用。
+
 1. 默认检索最近 30 天新闻/公告/监管披露：只取公司 IR、SEC、交易所公告和主流财经媒体中能影响交易纪律的 3-5 条（保留标题、日期、链接），不做新闻综述。社交媒体、无来源传闻、模型记忆、分析师目标价不能作为降级依据。整理成 `news_context.json`（形状见 `references/agent-contracts.md`）。
 
 2. 一条命令完成价量指标 + 评分 + 账户 overlay + Finnhub 补充 + 当日 snapshot + AI 意见：
@@ -57,6 +61,57 @@ python3 "$SKILL_DIR/scripts/indicators.py" \
 脚本内部并行取得 `bars`、`account/positions`、`finnhub` 和 `snapshot`（Finnhub 内部再按 symbol 并行），各段独立失败降级、不阻断核心评分。bars/snapshot 默认先经过 skill 根目录 `data/market-data.sqlite3`：完整 warm 覆盖不联网，冷启动、缺口、盘中 snapshot 或显式 refresh 才调用 Alpaca。**不要**直接查询 SQLite、在脚本外重复拉 snapshot，或为提速手动并行；统一使用脚本门面，避免 live/final 混用。
 
 缓存规则是低自由度约束：保持 `--cache auto` 默认；仅在用户要求刷新、复权数据疑似修订时使用 `refresh`，仅在故障对照时使用 `off`。设置 `WORTH_BUY_STOCKS_DB` 或 `--cache-db` 可覆盖数据库路径。`--input` 是硬离线边界：只允许读取 bars 和显式 context 文件，`on` 类在线开关也不得触网或读写 DB。
+
+### 全市场历史预热
+
+用户要求预热/加速全市场历史分析时，先运行 dry-run，确认本次 scanner universe、三年 coverage 与 batch 数；不要自动启动完整长任务：
+
+```bash
+python3 "$SKILL_DIR/scripts/cache_admin.py" warm-market --dry-run
+```
+
+用户明确要求执行后，再在空闲维护窗口运行；默认写入 skill 根目录 `data/market-data.sqlite3`，可中断并依靠 `sync_ranges` 直接复跑：
+
+```bash
+python3 "$SKILL_DIR/scripts/cache_admin.py" warm-market \
+  --years 3 --workers 4 --batch-size 50 \
+  --max-rpm 120 --max-runtime 3600 \
+  --feed iex --adjustment split
+```
+
+保持以下边界：预热只拉 final 日线，不拉 snapshot、账户、新闻或 AI；所有 bars pages 共享本进程 120 RPM 均匀预算，Alpaca Basic 200 RPM 的剩余空间留给其他用途，但无法控制同账号的外部客户端；同一 DB 只运行一个实例。小规模验证使用 `--symbols-file` 和不高于 30 RPM，并将 `scope_limited=true` 解释为 canary，不得报告成全市场完成。用 `cache_admin.py status` 查看已跟踪 symbols 的三年覆盖，用 `integrity-check` 验证数据库。
+
+需要以 Alpaca 当前全部可交易资产为基准查漏补缺时，先每日同步一次资产目录，再规划或执行对账：
+
+```bash
+python3 "$SKILL_DIR/scripts/cache_admin.py" sync-assets
+python3 "$SKILL_DIR/scripts/cache_admin.py" reconcile-market --dry-run
+python3 "$SKILL_DIR/scripts/cache_admin.py" reconcile-market \
+  --years 3 --workers 4 --batch-size 50 \
+  --max-rpm 120 --max-runtime 3600
+```
+
+资产目录按 UTC 日期缓存，完整保留 Alpaca 当前 active US equity 及历史消失记录；行情对账只处理 `tradable` 且可由 Basic IEX 支持的主流交易所标的。非交易资产和 OTC 仍写入目录并标明排除原因，不伪装成行情完整。`reconcile-market` 复用相同 coverage、限速、恢复和同库单实例机制；完整长任务仍需用户明确启动。低速验证可追加 `--symbols-file`，其结果只代表 canary 范围。
+
+### 单标的历史回测
+
+用户要求验证评分、回测某只股票或查看历史信号时，使用独立 `backtest.py single`，不要用当前评分的 K 线图冒充历史回测，也不要复制评分公式：
+
+```bash
+python3 "$SKILL_DIR/scripts/backtest.py" single \
+  --symbol {TICKER} \
+  --start 2021-07-01 --end 2026-07-09 \
+  --data-source cache-only \
+  --feed iex --adjustment split
+```
+
+默认 `cache-only` 是严格只读边界，只消费 SQLite 中 TICKER/SPY/QQQ 的 final 日线；coverage 或 260-session 预热不足时原样报告错误，不自动切换 `auto`。只有用户明确同意补数据时，才先用 `cache_admin.py warm` 对这三个 symbol 和明确日期范围预热，然后重新运行 cache-only。离线复现可显式用 `--data-source input --input bars.json`；只有用户明确要求 read-through 时才选择 `auto`。
+
+成功运行会在 `artifacts/backtests/` 生成 canonical JSON 和自包含 HTML。以 JSON 的 validation status、样本量、置信区间和 warning 为准；HTML 只负责展示。解读时同时报告 21/63 日事件研究、非重叠推断 N、rank-only 与 disciplined-verdict 的固定研究窗口及 managed 持仓管理仿真、单边成本、最大回撤以及标的/SPY buy-and-hold。`supports` 才能按冻结条件写“该标的这段历史支持”；`inconclusive` 必须写证据不足；`contradicts` 必须如实写方向相反。任何单标的结果都不得外推为宽市场 alpha。
+
+回测只验证历史价量主链路：不历史回填账户、新闻、Finnhub、Snapshot 或 AI opinion，不调参、不下单。固定 21/63 日场景是标准化研究窗口；managed 场景按日线近似执行建议仓位、初始止损、1R 保本、移动止损与收盘信号的下一开盘退出（不执行静态止盈）。需要重渲染时使用 `backtest.py render --artifact <json> --html <path>`，不得在页面里重新计算指标。
+
+contract 1.4 artifact 还会保留一个明确标为“已拒绝”的 stateful 实验场景，用于审计恢复/重新入场假设。该实验未通过 16 标的 holdout，不得作为正式策略结论或替代 managed 基线。
 
 可选 flag（按需追加）：
 
@@ -152,7 +207,8 @@ AI 意见没有可委派角色：它由 `indicators.py`/`scanner.py` 内置生�
 - `score.trade_plan`：入场/止损/止盈（2R/3R）/移动止损/追价上限。风控参考，不是订单。
 - `score.account_overlay`：持仓状态、当前/目标仓位、建议动作、保护性出场价。不可用时不得编造持仓。
 - `score.llm_overlay`：新闻面封顶回显（cap、降级原因、catalyst、红旗）。
-- `score.entry_timing`：入场时机层回显（分类与时机分）。分类：`pullback_reversal`=回调拐点（趋势资格完好+回调后放量反转触发，可替代趋势热度确认给出 `是`）、`trend_continuation`=趋势延续、`pullback_no_trigger`=回调中反转未确认、`overextended`=过热（评分达标的 `是` 降级为 `观察`，等回踩计划价）、`trend_broken`=中期趋势破坏。详情（过热度、回调深度、触发信号）在分析对象 `entry_timing` 字段。
+- `score.entry_timing`：入场时机层回显（分类与时机分）。分类：`pullback_reversal`=强趋势内回调拐点；`recovery_reversal`=深度回撤后的高置信放量强反转，长期趋势资格通过时允许 15% 受限试仓；`trend_continuation`=趋势延续；`pullback_no_trigger`=回调中反转未确认；`overextended`=过热；`trend_broken`=中期趋势破坏。详情（过热度、回调深度、触发信号）在分析对象 `entry_timing` 字段。
+- `score.position_exit`：持仓保护信号；高位反转或有效趋势破位给出下一开盘退出，普通持有状态写“继续持有”。
 - `score.data_flags`：历史不足、因子缺失、低流动性等提示。
 
 辅助字段（按需引用，完整 schema 见 `scripts/README.md`）：`raw_composite`、`factor_breakdown`（momentum 55 / rel_strength 35 / efficiency 10）、`risk_gates`、`confirmation`、`suggested_position_pct`、`supplemental.finnhub`、`supplemental.ai_opinion`（AI 意见：立场、是否与脚本一致、一句话理由、主要风险；只供结论段对照展示，绝不用于改评分或结论）。
@@ -166,6 +222,8 @@ AI 意见没有可委派角色：它由 `indicators.py`/`scanner.py` 内置生�
 例外一：`无法评分` 时不硬套 7 段也不画图，简短说明缺失的数据和补救步骤（如安装 CLI、检查 ticker、补历史数据）。
 
 例外二（轻量模式）：用户明确要求简短（如"简单说""快速看""一句话"）时，只输出 K 线图 + `结论` 段——内容仍全部来自脚本评分——并在末尾提示可展开完整分析；用户追问时再给完整 7 段。评分流程本身不简化。
+
+例外三（历史回测）：用户要求历史回测或评分有效性验证时，不套用当前时点的 7 段交易建议。先给 validation status，再给事件研究样本/IC、仿真与基准、回撤/成本、数据与模型 provenance、限制和 JSON/HTML 路径；所有数字只取 canonical backtest artifact。
 
 **K 线图**（置于 `结论` 上方，不占 7 个标题名额）
 

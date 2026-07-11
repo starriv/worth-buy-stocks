@@ -39,6 +39,15 @@ from ai_opinion import (  # noqa: E402
     sdk_available as ai_opinion_sdk_available,
     unavailable_opinions,
 )
+from skill_logging import (  # noqa: E402
+    add_logging_arguments,
+    bind_log_context,
+    clear_log_context,
+    configure_logging,
+    get_logger,
+)
+
+logger = get_logger("scanner")
 
 BENCHMARK_SYMBOLS = ("SPY", "QQQ")
 # IEX 日成交量约为全市场 2-3%；5 万 IEX 股 ≈ 数百万股全市场，作活跃粗筛门槛。
@@ -224,7 +233,11 @@ def _attach_ai_opinions(final_candidates: list[dict], scored_result: dict,
     if mode == "auto" and not (ai_opinion_sdk_available() and ai_opinion_has_api_key()):
         return "未配置 ANTHROPIC_API_KEY，跳过 AI 意见（auto 模式）"
     syms = [c["symbol"] for c in final_candidates]
-    sys.stderr.write(f"AI 意见: 对 {len(syms)} 个候选逐票调用，预计每票数十秒\n")
+    logger.info(
+        "ai_opinion_batch_started",
+        symbols_count=len(syms),
+        expected_latency="tens_of_seconds_per_symbol",
+    )
     artifact = opinions_for_result(scored_result, llm_context=llm_context, symbols=syms)
     if artifact.get("status") != "ok":
         if mode == "on":
@@ -286,7 +299,13 @@ def fetch_active_assets(exchanges=("NYSE", "NASDAQ"), asset_class="us_equity", t
         try:
             data = _run_json(cmd, timeout)
         except Exception as e:  # noqa: BLE001
-            sys.stderr.write(f"警告: asset list ({ex}) 失败已跳过: {e}\n")
+            logger.warning(
+                "asset_list_fetch_failed",
+                exchange=ex,
+                error_type=type(e).__name__,
+                reason=str(e),
+                status="skipped",
+            )
             continue
         arr = data if isinstance(data, list) else (data.get("assets") or data.get("data") or [])
         if isinstance(arr, list):
@@ -624,6 +643,7 @@ def _build_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--input", help="离线模式：读预取 JSON {assets,snapshots,bars,finnhub}，不触网")
     p.add_argument("--notify", choices=("on", "off"), default="off", help="on=把摘要推 Telegram")
+    add_logging_arguments(p)
     return p.parse_args(argv)
 
 
@@ -658,6 +678,9 @@ def _summary_text(result: dict) -> str:
 
 def main():
     args = _build_args()
+    configure_logging(level=args.log_level, log_format=args.log_format)
+    clear_log_context()
+    bind_log_context(command="scanner", feed=args.feed)
     if args.input:
         result = _scan_offline(args)
     else:
@@ -678,6 +701,11 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:  # noqa: BLE001
+        logger.exception(
+            "scanner_failed",
+            error_type=type(e).__name__,
+            reason=str(e),
+        )
         json.dump({"error": str(e)}, sys.stdout, ensure_ascii=False)
         sys.stdout.write("\n")
         sys.exit(1)
