@@ -28,7 +28,7 @@ def _weekdays(start: str, count: int) -> list[str]:
 
 
 class FakePanel:
-    def __init__(self, *, uptrend: bool):
+    def __init__(self, *, uptrend: bool, stale: tuple[str, ...] = ()):
         self.calendar = _weekdays("2024-01-01", 260)
         drift = 0.5 if uptrend else -0.5
         base = 500.0 if uptrend else 700.0
@@ -41,6 +41,12 @@ class FakePanel:
         self.scores = {
             "NVDA": 92.0, "META": 88.0, "AAPL": 75.0, "MSFT": 60.0,
         }
+        self.stale = set(stale)
+
+    def close(self, symbol: str, date: str):
+        if symbol == "SPY" or (symbol in self.scores and symbol not in self.stale):
+            return 100.0
+        return None
 
     def scores_at(self, date: str):
         return {
@@ -73,6 +79,14 @@ class RotationListTests(unittest.TestCase):
         self.assertEqual(result["diff"]["buy"], ["NVDA"])
         self.assertEqual(result["diff"]["sell"], ["MSFT"])
         self.assertEqual(result["diff"]["keep"], ["META"])
+
+    def test_stale_symbol_without_signal_day_bar_is_excluded(self):
+        result = build_rotation_list(
+            FakePanel(uptrend=True, stale=("NVDA",)), top_n=2
+        )
+        self.assertEqual(
+            [row["symbol"] for row in result["target"]], ["META", "AAPL"]
+        )
 
     def test_unknown_signal_date_is_rejected(self):
         with self.assertRaises(ValueError):

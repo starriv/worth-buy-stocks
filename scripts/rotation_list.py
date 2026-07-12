@@ -64,6 +64,9 @@ def build_rotation_list(
     ranked: list[dict[str, Any]] = []
     symbols = panel.scores_at(date)
     for symbol in UNIVERSE:
+        # 退市/停牌票在信号日没有 bar，评分只是陈旧数据的残影，不得进入名单。
+        if panel.close(symbol, date) is None:
+            continue
         score = (symbols.get(symbol, {}) or {}).get("score") or {}
         composite = score.get("composite")
         if isinstance(composite, (int, float)) and math.isfinite(float(composite)):
