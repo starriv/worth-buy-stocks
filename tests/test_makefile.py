@@ -107,6 +107,36 @@ class TestMakefileGateway(unittest.TestCase):
         self.assertIn("index-lifecycle-validate", result.stdout)
         self.assertIn('--cache-db "/tmp/research.sqlite3"', result.stdout)
 
+    def test_rotation_targets_forward_the_promoted_config_tool(self):
+        result = self.run_make("-n", "rotation-record", "TOP=20")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("scripts/rotation_list.py", result.stdout)
+        self.assertIn("--record", result.stdout)
+        result = self.run_make("-n", "rotation-evaluate")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--evaluate", result.stdout)
+
+    def test_universe_warm_plan_pins_six_years_and_stays_dry(self):
+        result = self.run_make(
+            "-n", "rotation-universe-warm-plan",
+            "CACHE_DB=/tmp/universe.sqlite3",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("reconcile-market", result.stdout)
+        self.assertIn('--years "6"', result.stdout)
+        self.assertIn("--dry-run", result.stdout)
+        # 完整执行 target 不带 dry-run，但同样锁定 6 年窗口。
+        result = self.run_make("-n", "rotation-universe-warm")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('--years "6"', result.stdout)
+        self.assertNotIn("--dry-run", result.stdout)
+
+    def test_regression_target_survives_missing_pytest(self):
+        result = self.run_make("-n", "test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("pytest", result.stdout)
+        self.assertIn("unittest", result.stdout)
+
     def test_status_preserves_json_only_stdout_and_missing_db(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "missing.sqlite3"

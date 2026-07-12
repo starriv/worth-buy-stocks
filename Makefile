@@ -60,9 +60,11 @@ FORWARD_SYMBOLS_ARG = $(if $(strip $(FORWARD_SYMBOLS)),--symbols "$(FORWARD_SYMB
 	cache-purge cache-purge-all \
 	backtest-factor backtest-score backtest-robustness backtest-visual backtest-lifecycle-validate \
 	backtest-index-lifecycle-validate \
-	backtest-managed-ablation backtest-signal-ablation backtest-rotation-study rotation-list \
+	backtest-managed-ablation backtest-signal-ablation backtest-rotation-study \
+	rotation-list rotation-record rotation-evaluate \
+	rotation-universe-warm-plan rotation-universe-warm \
 	forward-record forward-evaluate contract \
-	compile test-unit test validate-skill diff-check check
+	compile test validate-skill diff-check check
 
 help: ## [基础] 显示统一命令入口和常用变量
 	@awk 'BEGIN { FS = ":.*## "; printf "worth-buy-stocks commands\n\n" } /^[a-zA-Z0-9_.-]+:.*## / { printf "  %-22s %s\n", $$1, $$2 } END { printf "\nVariables: PYTHON CACHE_DB FEED SYMBOLS SYMBOL START END ARGS GLOBAL_ARGS\n          DATA_SOURCE COST_BPS HTML YEARS WORKERS BATCH_SIZE MAX_RPM MAX_RUNTIME TIMEOUT FORCE\n" }' $(MAKEFILE_LIST)
@@ -184,6 +186,28 @@ rotation-list: ## [运行] 输出轮动晋升配置的当日 Top-N 名单（只�
 		--feed "$(FEED)" --adjustment "$(ADJUSTMENT)" \
 		--cache-db "$(CACHE_DB)" $(ARGS)
 
+rotation-record: ## [运行] 输出并固化当日轮动名单为前瞻记录（调仓日使用）
+	@$(PYTHON) scripts/rotation_list.py $(GLOBAL_ARGS) --top "$(TOP)" \
+		--feed "$(FEED)" --adjustment "$(ADJUSTMENT)" \
+		--cache-db "$(CACHE_DB)" --record $(ARGS)
+
+rotation-evaluate: ## [研究] 结算已满 63 交易日的轮动前瞻记录（vs QQQ/SPY）
+	@$(PYTHON) scripts/rotation_list.py $(GLOBAL_ARGS) \
+		--feed "$(FEED)" --adjustment "$(ADJUSTMENT)" \
+		--cache-db "$(CACHE_DB)" --evaluate $(ARGS)
+
+# 规则化票池复验的前置数据计划：全资产目录 6 年 coverage（IEX 边界 2020-07-27）。
+# 先 make sync-assets；完整执行为数小时长任务，须用户明确启动，可中断续跑。
+rotation-universe-warm-plan rotation-universe-warm: YEARS = 6
+
+rotation-universe-warm-plan: ## [预热] dry-run 规则化票池复验所需的全资产 6 年 coverage
+	@$(CACHE_ADMIN) reconcile-market $(MARKET_JOB_ARGS) \
+		$(FORCE_ASSETS_ARG) --dry-run $(ARGS)
+
+rotation-universe-warm: ## [预热] 显式执行全资产 6 年预热（长任务，可中断续跑）
+	@$(CACHE_ADMIN) reconcile-market $(MARKET_JOB_ARGS) \
+		$(FORCE_ASSETS_ARG) $(ARGS)
+
 forward-record: ## [研究] 记录当日前瞻评分，可用 FORWARD_SYMBOLS 覆盖默认篮子
 	@$(PYTHON) scripts/forward_log.py --feed "$(FEED)" \
 		--adjustment "$(ADJUSTMENT)" --cache-db "$(CACHE_DB)" $(GLOBAL_ARGS) \
@@ -201,11 +225,12 @@ contract: ## [质量] 校验 ARTIFACT，KIND 默认 result
 compile: ## [质量] 编译全部 Python 模块
 	@$(PYTHON) -m compileall -q scripts tests
 
-test-unit: ## [质量] 运行 unittest 全量回归
-	@$(PYTHON) -m unittest discover -s tests -q
-
-test: ## [质量] 运行 pytest 全量回归
-	@$(PYTHON) -m pytest tests/ -q
+test: ## [质量] 运行全量回归（优先 pytest，缺失时回退 unittest）
+	@if $(PYTHON) -c 'import pytest' >/dev/null 2>&1; then \
+		$(PYTHON) -m pytest tests/ -q; \
+	else \
+		$(PYTHON) -m unittest discover -s tests -q; \
+	fi
 
 validate-skill: ## [质量] 运行 Codex skill 结构校验
 	@[ -f "$(SKILL_VALIDATOR)" ] || { printf '%s\n' "skill validator not found: $(SKILL_VALIDATOR)" >&2; exit 2; }
