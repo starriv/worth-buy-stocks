@@ -248,6 +248,8 @@ AI 意见载荷采用字段白名单，输入中不含 `verdict`、`composite` �
 | `backtest.py managed-ablation` | research-only 执行层消融 | 共享单次 replay 跑 managed 基线 + 出场/入场时机/仓位变体，冻结 holdout 门槛评审 |
 | `backtest.py signal-ablation` | research-only 信号层消融 | 时间线后处理改写 verdict（过热梯度、确认放宽、相对强度门槛），执行层冻结 |
 | `backtest.py rotation-study` | 横截面 Top-N 轮动组合研究 | 预注册配置矩阵、dev 选优 + holdout 双门槛（收益/回撤 vs QQQ）、日频权益与成本 |
+| `backtest.py pragmatic-entry-validate` | 重放已拒绝的务实分段入场 v0 | 试仓/确认/退出/冷却状态迁移、追价、MFE/MAE、成本与首批独立 holdout |
+| `backtest.py pragmatic-entry-v1-validate` | 重放已拒绝的务实分段入场 v1 | 5% 试仓、未确认退出、基线仓位保真与第二批独立 holdout；不得作为生产策略 |
 | `rotation_list.py` | 轮动策略当日名单 | 用晋升配置（63 日调仓 Top-20 等权 + SPY 200 日线 regime）输出目标名单与持仓 diff |
 | `forward_log.py` | 积累样本外记录 | 固化当日评分，满 63 个交易日后按结论和时机分类对账 |
 
@@ -288,6 +290,29 @@ AI 意见载荷采用字段白名单，输入中不含 `verdict`、`composite` �
 | `local_env.py` | `.env` 查找与可选凭证读取 |
 | `agent_contracts.py` / `validate_agent_contract.py` | 并行产物契约定义与 CLI 校验 |
 | `scanner.py` | 全市场扫描、流动性初筛、两轮评分和新闻复核 |
+| `options_seller.py` | 模块化期权策略 CLI；策略选择、纽约交易日边界、两阶段扫描和离线契约编排 |
+| `options_engine/setup.py` | BOLL 触轨收回/回落形态、趋势兼容与标的流动性 |
+| `options_engine/volatility_surface.py` | 当前链 ATM IV、25Δ 偏斜、期限结构与一倍标准差预期波动 |
+| `options_engine/regime.py` | SPY/QQQ 趋势与实现波动率市场状态门控 |
+| `options_engine/structure_optimizer.py` | ATR 动态宽度与 safety/balanced/income 候选标记 |
+| `options_engine/iv_history.py` | 固定 30D IV 总方差插值、每日 point-in-time 快照与历史 Rank/Percentile |
+| `options_engine/portfolio_risk.py` | 标准 OCC 垂直价差配对、方向调整后的损失相关、单标的/同到期/相关组/总风险集中度 |
+| `options_engine/lifecycle.py` | 已有信用价差的止盈、14/7 DTE 双层退出、Delta、短腿穿越与事件退出纪律 |
+| `options_engine/ledger.py` | 用户确认开仓、分批平仓成交分录、剩余数量、生命周期历史与描述性绩效的本地 SQLite 审计台账 |
+| `options_engine/lifecycle_live.py` | Alpaca 逐腿持仓核对、当前期权链、IEX 现价与事件自动补全 |
+| `options_engine/lifecycle_reporting.py` | 生命周期告警分级、中文 Markdown/JSON 日报与 Telegram 短摘要 |
+| `options_engine/lifecycle_notifications.py` | 显式启用、失败隔离的可选 Telegram 生命周期通知 |
+| `options_position_manager.py` | add/list/close/history/review/performance 台账 CLI；实时路径保持账户只读 |
+| `options_engine/data.py` / `live.py` | 期权合约/快照归一化、OPRA 回退、资产股池和事件采集 |
+| `options_engine/spreads.py` | 标准同系列 Bull Put/Bear Call 构造、乘数风险、净 Greeks 与淘汰诊断 |
+| `options_engine/multi_leg.py` | 多腿合约归一化、保守净权利金、组合净 Greeks 与逐腿可执行性校验 |
+| `options_engine/scoring.py` / `events.py` | 报价新鲜度、公司与美国宏观事件硬闸门、费用后经济性、账户风险预算和卖方适配分 |
+| `options_engine/strategies/vertical_credit.py` | BOLL 垂直信用价差的独立初筛、构造、评分和代表结构 |
+| `options_engine/strategies/calendar_iv.py` | 同执行价跨期长日历的净 Delta、IV 期限差、Vega/Theta、借记与指派风控 |
+| `options_engine/strategies/iron_condor.py` | BOLL 中性区间初筛、同到期对称四腿构造、双侧风险、净 Greeks 与独立评分；scan 账户中立，analyze 才叠加账户风险 |
+| `options_engine/strategies/iron_butterfly.py` | BOLL 窄区间初筛、ATM 公共体价、对称四腿构造、盈亏平衡覆盖与高 Gamma/pin 风控 |
+| `options_engine/strategies/registry.py` | `vertical_credit` / `calendar_iv` / `iron_condor` / `iron_butterfly` 注册与 `all` 解析 |
+| `options_engine/contracts.py` / `service.py` | 严格离线/结果契约与确定性候选编排 |
 | `chart.py` | 终端 K 线、自包含 HTML 图和计划价位线 |
 | `notify_telegram.py` | Telegram 文本推送 |
 | `backtesting/data.py` | 单标的 `cache-only` / `auto` / `input` 数据边界、coverage、final-only 与数据指纹 |
@@ -299,6 +324,8 @@ AI 意见载荷采用字段白名单，输入中不含 `verdict`、`composite` �
 | `backtesting/rotation.py` | 横截面 Top-N 轮动组合仿真、预注册配置矩阵与 dev/holdout 选优晋升 |
 | `rotation_list.py` | 轮动晋升配置的当日 Top-N 名单、regime 状态与持仓 diff（只分析不交易） |
 | `backtesting/index_lifecycle_validation.py` | 排除 QQQ/SPY 的 4 宽基 + 11 行业 ETF 分层 holdout、fail-closed 门槛和确定性报告 |
+| `backtesting/pragmatic.py` | research-only 分段试仓、确认加仓、追价禁止、冷却和受控再入场状态机 |
+| `backtesting/pragmatic_validation*.py` | 两批互不重叠的预注册 holdout、联合晋升门槛与 reject 报告 |
 | `backtesting/artifact.py` / `visualization.py` | canonical artifact、语义 hash、原子写入与只读自包含 HTML |
 | `backtesting/panel.py` | 宽票池历史 Panel、前瞻收益与 cache-backed loader |
 | `backtesting/cross_sectional.py` / `universe.py` | 三类宽票池研究循环与冻结票池 |
@@ -313,6 +340,8 @@ AI 意见载荷采用字段白名单，输入中不含 `verdict`、`composite` �
 以下命令均从仓库根目录运行。`make help` 是日常使用的权威索引；完整环境配置见[本地环境设置](../references/setup.md)。Makefile 使用静默 recipe，不会污染脚本 stdout。常用变量包括 `PYTHON`、`CACHE_DB`、`FEED`、`SYMBOLS`、`SYMBOL`、`START`、`END`、`DATA_SOURCE`、`COST_BPS`、`YEARS`、`WORKERS`、`BATCH_SIZE`、`MAX_RPM` 和 `MAX_RUNTIME`。
 
 `ARGS` 原样追加到具体子命令之后，例如 `ARGS="--symbols-file canary.txt"`；`GLOBAL_ARGS` 放在 subcommand 之前，例如 `GLOBAL_ARGS="--log-format console --log-level DEBUG"`。没有 subcommand 的 CLI 两者都作为普通附加参数。新增公共 CLI 时同步 Make target 和 `tests/test_makefile.py`，不要把业务逻辑搬进 Makefile。
+
+期权生命周期常用入口：`make options-manage` 输出实时检查 JSON，`make options-report` 在 `OPTIONS_REPORT_DIR` 生成 Markdown/JSON 日报并附带实际平仓绩效，`make options-performance` 单独输出描述性绩效。日报默认不通知；需要告警推送时使用 `make options-report ARGS="--notify alerts"`。
 
 ```bash
 make help

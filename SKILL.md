@@ -1,9 +1,9 @@
 ---
 name: worth-buy-stocks
-description: "Evaluate whether a US stock is worth buying, holding, reducing, avoiding, or watchlisting under the user's Alpaca-based trend-following and relative-strength framework, with news/event-risk overlay, read-only account exposure overlay, display-only AI second opinion, whole-market scanning, SQLite market-data caching, a persistent Alpaca asset catalog, safe historical warmup and coverage reconciliation, and optional multi-agent evidence collection via stable JSON contracts. Use when the user asks 值得买吗, 股票评分, buy/hold/sell/avoid/watchlist, Alpaca 行情或持仓, account exposure, 全市场扫描/找今天能买的, 行情缓存/历史数据预热/全市场三年数据/资产目录/查漏补缺, multi-agent stock analysis, 并行采集, agent contracts, 入场价/出场价/止盈止损, 30 天行情, 当日行情, 新闻面/事件风险, AI 意见/AI 分析对比, 交易纪律, 趋势跟随, 相对强度, 主升趋势, 修正阶段, momentum leadership, 量价确认, 顶背离, or 超买超卖."
+description: "Evaluate US stocks under an Alpaca trend and relative-strength framework, and screen modular defined-risk options: Bollinger Bull Put/Bear Call credits, near-delta-neutral long calendars, Iron Condors, and Iron Butterflies. Uses liquidity, Greeks, IV/term structure, conservative economics, event gates, read-only exposure, scans, caching, and backtests. Use for 值得买吗, 股票评分, buy/hold/sell/watchlist, 期权卖方, 卖权利金, BOLL 价差期权, Bull Put, Bear Call, Iron Condor/铁鹰, Iron Butterfly/铁蝶, 日历价差, Delta 中性, 隐含波动率策略, 信用价差, Alpaca 行情/持仓/期权链, 全市场扫描, 历史回测, 新闻/财报风险, 趋势跟随, 相对强度, 量价确认, or 超买超卖."
 ---
 
-# 值得买 - 股票版
+# 值得买 - 股票与期权卖方
 
 ## 硬性纪律
 
@@ -17,6 +17,7 @@ description: "Evaluate whether a US stock is worth buying, holding, reducing, av
 6. **feed 固定 `iex`**：只有用户明确说明有 SIP 权限并要求使用 `sip` 时才切换。
 7. **最终回复是书面交易决策**：默认只输出结论，不输出思考过程、工具计划或逐步计算；不展示源码、命令参数、JSON 路径、字段名、布尔值、空数组、`null` 或内部状态，全部翻译成自然语言。每一项都写成正式决策或事实陈述（"通过""维持观察""按 X 价分批"），两类句式禁止出现：(a) 机制性否定——描述评分内部"没发生什么"的句子，如"未影响评分""评分未被新闻压低""不构成临近财报降级""未用于降级/升级/调整建议"；(b) 免责声明与限定语，如"仅为分析参考""仅作重评参照""不构成下单指令"。未触发的环节直接给结论状态（"通过"），不解释机制；触发了的只写事实原因与决策结果。用户明确要求原始 JSON 或调试信息时例外。
 8. **仅支持美股**（Alpaca 覆盖标的）；非美股 ticker 直接说明不支持，不要强行评分。
+9. **期权只做定义风险筛选**：支持同到期 Bull Put / Bear Call 垂直信用价差、对称翼宽 Iron Condor、ATM 同体价对称翼 Iron Butterfly，以及同行权价、同类型、卖近月买远月的净借记长日历价差；不分析裸卖、Diagonal、broken-wing、0DTE，不提交订单。期权评分只能来自 `options_seller.py`，不得用股票 `score` 代替。
 
 数据角色：Alpaca 价量是主证据；新闻/公告默认作为事件风险 overlay；Alpaca 持仓默认作为只读敞口 overlay；Finnhub 是可选补充（quote 交叉校验、公司新闻、财报日历、元数据），不得替代 Alpaca 主链路。AI 意见（脚本内置调用 Claude API 生成）默认作为对照展示 overlay：只用于让用户对比"量价纪律结论 vs AI 判断"，不参与评分、不触发降级、不可用于升级或改写结论；不可用时如实写"无法确认"，不得编造或自行补写 AI 意见。
 
@@ -31,6 +32,73 @@ description: "Evaluate whether a US stock is worth buying, holding, reducing, av
 - Finnhub 无 key 或限流：自动跳过，不影响评分。
 - AI 意见无 `ANTHROPIC_API_KEY`、未装 `anthropic` SDK 或调用失败：自动跳过，结论段写"AI 意见: 无法确认"。
 - SQLite 缓存异常：先运行 `python3 "$SKILL_DIR/scripts/cache_admin.py" integrity-check`；在线评分可用 `--cache off` 建立无缓存对照。
+
+## 期权卖方筛选
+
+用户问期权卖方、卖权利金、BOLL/信用价差、Iron Condor、Iron Butterfly、日历价差或 Delta 中性 IV 策略时，读取 `references/options-seller.md` 并走独立入口；不要套用股票版 7 段评分，也不要先要求股票结论必须为“是”。策略层按 `vertical_credit`、`calendar_iv`、`iron_condor` 与 `iron_butterfly` 独立完成标的初筛、链窗口、结构构造和评分；`all` 只合并候选，不混用各模块硬闸门。
+
+单标的分析：
+
+```bash
+python3 "$SKILL_DIR/scripts/options_seller.py" analyze \
+  --symbol {TICKER} --strategy vertical_credit \
+  --feed iex --option-feed auto \
+  --cache-db "$SKILL_DIR/data/market-data.sqlite3" > options-result.json
+```
+
+全市场两阶段扫描：
+
+```bash
+python3 "$SKILL_DIR/scripts/options_seller.py" scan \
+  --strategy vertical_credit --feed iex --option-feed auto \
+  --chain-top 25 --top 20 \
+  --cache-db "$SKILL_DIR/data/market-data.sqlite3" > options-scan.json
+```
+
+Delta 近零长日历价差：
+
+```bash
+python3 "$SKILL_DIR/scripts/options_seller.py" analyze \
+  --symbol {TICKER} --strategy calendar_iv \
+  --feed iex --option-feed auto \
+  --cache-db "$SKILL_DIR/data/market-data.sqlite3" > calendar-result.json
+```
+
+区间震荡 Iron Condor：
+
+```bash
+python3 "$SKILL_DIR/scripts/options_seller.py" analyze \
+  --symbol {TICKER} --strategy iron_condor \
+  --feed iex --option-feed auto \
+  --cache-db "$SKILL_DIR/data/market-data.sqlite3" > iron-condor-result.json
+```
+
+窄区间 Iron Butterfly：
+
+```bash
+python3 "$SKILL_DIR/scripts/options_seller.py" analyze \
+  --symbol {TICKER} --strategy iron_butterfly \
+  --feed iex --option-feed auto \
+  --cache-db "$SKILL_DIR/data/market-data.sqlite3" > iron-butterfly-result.json
+```
+
+已有定义风险价差台账与只读生命周期检查：
+
+```bash
+python3 "$SKILL_DIR/scripts/options_position_manager.py" add --input confirmed-fill.json
+python3 "$SKILL_DIR/scripts/options_position_manager.py" review --live
+python3 "$SKILL_DIR/scripts/options_position_manager.py" review --live \
+  --report-dir "$SKILL_DIR/artifacts/options" --report-format both --include-performance
+python3 "$SKILL_DIR/scripts/options_position_manager.py" performance
+```
+
+第一阶段只用标的已完成日线、BOLL 状态和流动性缩小股池：垂直信用价差要求触轨收回/回落；日历 IV、Iron Condor 与 Iron Butterfly 要求价格接近 BOLL 中部且中轨斜率受控，不要求方向性触轨，其中 Butterfly 的中心与斜率门槛最严格。第二阶段才为靠前标的按所选策略的期限与行权价窗口拉期权链。期权股池默认覆盖 AMEX、ARCA、BATS、NASDAQ、NYSE、NYSEARCA，包含 SPY 等 ARCA ETF。保持 `--option-feed auto`：有 OPRA 权限时用 OPRA，只有明确的订阅限制才回退 indicative；indicative 候选最多为“观察等待”。实时模式不得把历史 `--end` 与当前链混用；历史复盘统一使用同一 `as_of` 的 `--input`。`--input` 是硬离线边界，输入契约必须含 `bars`、`option_chains` 和 `events`。
+
+只采用脚本的 `strategy_score`/兼容字段 `seller_score`、`verdict`、保守自然价、组合净 Greeks、风险预算组数和风险原因。垂直信用价差报告权利金、最大收益/亏损与盈亏平衡；Iron Condor 报告四腿自然净权利金、上下侧最大亏损、双盈亏平衡与净 Delta/Theta/Vega；Iron Butterfly 还必须报告 ATM 体价、窄盈利区、盈亏平衡相对预期波动覆盖和高 Gamma/pin risk；长日历报告远月 Ask − 近月 Bid 的自然借记、借记风险、前后期限 IV 差和初始净 Delta，最大收益保持不可预先确定。只组合 underlying/root/style/乘数一致的标准美式合约，调整合约直接排除。事件日历不可用、报价/Greeks/持仓量或自然价方向 size 缺失时原样写“数据不足”。不得把初始 Delta 近零写成持续 Delta 中性或精确胜率，不得用 Mid 冒充可成交价格。
+
+实时期权筛选默认把固定 30D ATM IV 的 point-in-time 日快照写入独立 options history 数据库；历史 Rank/Percentile 只使用当前纽约交易日之前且至少达到 60 个观测。垂直信用价差默认 30–45 DTE、短腿绝对 Delta 0.15–0.25、费用后单笔风险 0.5%；宏观日历覆盖 CPI/PCE/就业/FOMC/GDP，发布当日及前一交易日冻结新仓。账户 overlay 只读：现阶段只把可配对的标准定义风险垂直价差计入已确认敞口，无法配对的期权腿或缺失相关性数据必须标为数据不足；账户上下文未确认不得给出“适合构建”。现有生命周期台账也只支持垂直信用价差；日历价差、Iron Condor 与 Iron Butterfly 筛选不得冒用这套退出规则或写入该台账。生命周期台账只记录用户确认的实际开平仓事实；实时检查逐腿核对 Alpaca 持仓并自动补期权链、IEX 现价和事件，输出继续持有、止盈退出、计划退出、立即退出评估或数据不足。DTE 和事件窗口统一使用纽约市场日期；14 DTE 开始计划退出，7 DTE 进入立即退出评估。盘中平仓报价默认不得超过 15 分钟，并要求短腿 Ask、长腿 Bid 对应 size 可执行。已确定的短腿穿越、Delta/亏损倍数、DTE 或止盈动作优先于可选数据缺口，缺口作为并列数据警告。账户差异不得自动关闭台账，所有平仓记录必须使用用户确认的实际成交净支出、数量和时间；部分平仓保留原开仓数量并以剩余组数继续核对。日报与 Telegram 都必须显式开启；Telegram 默认关闭且失败不得遮蔽检查结果。严格离线 review 禁止绩效台账和通知参数。绩效只使用实际平仓成交分录，排除剩余未平仓估值；检查动作与随后平仓的关联只作描述性证据，不写成因果验证或回测结论。
+
+期权账户边界按运行模式固定：`scan` 是账户中立的策略发现流程，不读取账户、不把持仓标的加入行情请求，账户权益、购买力、交易限制和现有敞口均不得影响扫描候选、策略分、结论或排序；`analyze` 才可读取账户并报告风险预算和组合适配。上文“账户上下文未确认不得给出适合构建”只约束账户适配结论，不限制账户中立扫描给出策略结构结论。
 
 ## 数据流程（单股评分）
 
@@ -234,6 +302,8 @@ AI 意见没有可委派角色：它由 `indicators.py`/`scanner.py` 内置生�
 例外二（轻量模式）：用户明确要求简短（如"简单说""快速看""一句话"）时，只输出 K 线图 + `结论` 段——内容仍全部来自脚本评分——并在末尾提示可展开完整分析；用户追问时再给完整 7 段。评分流程本身不简化。
 
 例外三（历史回测）：用户要求历史回测或评分有效性验证时，不套用当前时点的 7 段交易建议。先给 validation status，再给事件研究样本/IC、仿真与基准、回撤/成本、数据与模型 provenance、限制和 JSON/HTML 路径；所有数字只取 canonical backtest artifact。
+
+例外四（期权策略）：不套用股票版 7 段。按 `references/options-seller.md` 的所选策略模板输出；垂直信用价差写 BOLL 触发与权利金，日历 IV 写期限配对与自然借记，Iron Condor/Butterfly 写四腿自然净权利金、双侧风险、净 Greeks 和指派风险。没有合格价差时列出最关键的硬过滤或数据缺口，不补造候选。
 
 **K 线图**（置于 `结论` 上方，不占 7 个标题名额）
 

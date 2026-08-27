@@ -9,8 +9,10 @@ CACHE_DB ?= $(SKILL_DIR)/data/market-data.sqlite3
 SKILL_VALIDATOR ?= $(CODEX_HOME)/skills/.system/skill-creator/scripts/quick_validate.py
 
 FEED ?= iex
+OPTION_FEED ?= auto
 ADJUSTMENT ?= split
 SYMBOLS ?= AAPL,SPY,QQQ
+OPTIONS_SYMBOLS ?=
 SYMBOL ?= AAPL
 FORWARD_SYMBOLS ?=
 TOP ?= 20
@@ -32,6 +34,8 @@ PURGE_SYMBOLS ?=
 CONFIRM ?=
 KIND ?= result
 ARTIFACT ?= result.json
+OPTIONS_LEDGER_DB ?= $(SKILL_DIR)/data/options-ledger.sqlite3
+OPTIONS_REPORT_DIR ?= $(SKILL_DIR)/artifacts/options
 NOTIFY_FILE ?=
 HORIZON_DAYS ?= 63
 DATA_SOURCE ?= cache-only
@@ -52,14 +56,15 @@ PLAN_ARG = $(if $(strip $(PLAN)),--plan "$(PLAN)",)
 FORCE_ARG = $(if $(filter 1 true yes on,$(FORCE)),--force,)
 FORCE_ASSETS_ARG = $(if $(filter 1 true yes on,$(FORCE)),--force-assets,)
 FORWARD_SYMBOLS_ARG = $(if $(strip $(FORWARD_SYMBOLS)),--symbols "$(FORWARD_SYMBOLS)",)
+OPTIONS_SYMBOLS_ARG = $(if $(strip $(OPTIONS_SYMBOLS)),--symbols "$(OPTIONS_SYMBOLS)",)
 
 .PHONY: help install doctor \
-	analyze scan chart notify \
+	analyze scan options-analyze options-scan options-manage options-report options-performance options-ledger-list chart notify \
 	status integrity cache-warm cache-refresh sync-assets \
 	warm-market-plan warm-market reconcile-plan reconcile-market \
 	cache-purge cache-purge-all \
 	backtest-factor backtest-score backtest-robustness backtest-visual backtest-lifecycle-validate \
-	backtest-index-lifecycle-validate \
+	backtest-index-lifecycle-validate backtest-pragmatic-validate backtest-pragmatic-v1-validate \
 	backtest-managed-ablation backtest-signal-ablation backtest-rotation-study \
 	rotation-list rotation-record rotation-evaluate \
 	rotation-universe-warm-plan rotation-universe-warm \
@@ -67,7 +72,7 @@ FORWARD_SYMBOLS_ARG = $(if $(strip $(FORWARD_SYMBOLS)),--symbols "$(FORWARD_SYMB
 	compile test validate-skill diff-check check
 
 help: ## [基础] 显示统一命令入口和常用变量
-	@awk 'BEGIN { FS = ":.*## "; printf "worth-buy-stocks commands\n\n" } /^[a-zA-Z0-9_.-]+:.*## / { printf "  %-22s %s\n", $$1, $$2 } END { printf "\nVariables: PYTHON CACHE_DB FEED SYMBOLS SYMBOL START END ARGS GLOBAL_ARGS\n          DATA_SOURCE COST_BPS HTML YEARS WORKERS BATCH_SIZE MAX_RPM MAX_RUNTIME TIMEOUT FORCE\n" }' $(MAKEFILE_LIST)
+	@awk 'BEGIN { FS = ":.*## "; printf "worth-buy-stocks commands\n\n" } /^[a-zA-Z0-9_.-]+:.*## / { printf "  %-22s %s\n", $$1, $$2 } END { printf "\nVariables: PYTHON CACHE_DB OPTIONS_LEDGER_DB OPTIONS_REPORT_DIR FEED OPTION_FEED SYMBOLS OPTIONS_SYMBOLS SYMBOL START END ARGS GLOBAL_ARGS\n          DATA_SOURCE COST_BPS HTML YEARS WORKERS BATCH_SIZE MAX_RPM MAX_RUNTIME TIMEOUT FORCE\n" }' $(MAKEFILE_LIST)
 
 install: ## [基础] 安装 Python 强制依赖
 	@$(PYTHON) -m pip install -r requirements.txt
@@ -88,6 +93,35 @@ scan: ## [运行] 全市场扫描，使用 TOP 和 ARGS 调整范围
 	@$(PYTHON) scripts/scanner.py $(GLOBAL_ARGS) --feed "$(FEED)" \
 		--adjustment "$(ADJUSTMENT)" --top "$(TOP)" \
 		--cache-db "$(CACHE_DB)" $(ARGS)
+
+options-analyze: ## [期权] 按 ARGS 中的 --strategy 分析 SYMBOL（默认垂直信用价差）
+	@$(PYTHON) scripts/options_seller.py $(GLOBAL_ARGS) analyze --symbol "$(SYMBOL)" \
+		--feed "$(FEED)" --option-feed "$(OPTION_FEED)" \
+		--adjustment "$(ADJUSTMENT)" --cache-db "$(CACHE_DB)" $(ARGS)
+
+options-scan: ## [期权] 模块化两阶段扫描；OPTIONS_SYMBOLS 可覆盖全市场股池
+	@$(PYTHON) scripts/options_seller.py $(GLOBAL_ARGS) scan $(OPTIONS_SYMBOLS_ARG) \
+		--feed "$(FEED)" --option-feed "$(OPTION_FEED)" \
+		--adjustment "$(ADJUSTMENT)" --cache-db "$(CACHE_DB)" --top "$(TOP)" $(ARGS)
+
+options-manage: ## [期权] 从本地台账核对账户并实时检查已有信用价差
+	@$(PYTHON) scripts/options_position_manager.py review --live \
+		--ledger-db "$(OPTIONS_LEDGER_DB)" --feed "$(FEED)" \
+		--option-feed "$(OPTION_FEED)" --cache-db "$(CACHE_DB)" $(ARGS)
+
+options-report: ## [期权] 实时检查并生成中文 Markdown/JSON 日报（默认不通知）
+	@$(PYTHON) scripts/options_position_manager.py review --live \
+		--ledger-db "$(OPTIONS_LEDGER_DB)" --feed "$(FEED)" \
+		--option-feed "$(OPTION_FEED)" --cache-db "$(CACHE_DB)" \
+		--include-performance --report-dir "$(OPTIONS_REPORT_DIR)" --report-format both $(ARGS)
+
+options-performance: ## [期权] 汇总实际平仓成交与管理记录覆盖率
+	@$(PYTHON) scripts/options_position_manager.py performance \
+		--ledger-db "$(OPTIONS_LEDGER_DB)" $(ARGS)
+
+options-ledger-list: ## [期权] 列出本地定义风险价差台账
+	@$(PYTHON) scripts/options_position_manager.py list \
+		--ledger-db "$(OPTIONS_LEDGER_DB)" $(ARGS)
 
 chart: ## [运行] 为 SYMBOL 生成终端和 HTML K 线，可传 PLAN=result.json
 	@$(PYTHON) scripts/chart.py $(GLOBAL_ARGS) --symbol "$(SYMBOL)" --count "$(COUNT)" \
@@ -164,6 +198,14 @@ backtest-lifecycle-validate: ## [研究] 运行预注册 stateful 多标的 cach
 
 backtest-index-lifecycle-validate: ## [研究] 运行预注册指数 ETF stateful 分层 cache-only holdout
 	@$(PYTHON) scripts/backtest.py $(GLOBAL_ARGS) index-lifecycle-validate \
+		--cache-db "$(CACHE_DB)" $(ARGS)
+
+backtest-pragmatic-validate: ## [研究] 重放已拒绝的务实分段入场 v0 holdout
+	@$(PYTHON) scripts/backtest.py $(GLOBAL_ARGS) pragmatic-entry-validate \
+		--cache-db "$(CACHE_DB)" $(ARGS)
+
+backtest-pragmatic-v1-validate: ## [研究] 重放已拒绝的务实分段入场 v1 独立 holdout
+	@$(PYTHON) scripts/backtest.py $(GLOBAL_ARGS) pragmatic-entry-v1-validate \
 		--cache-db "$(CACHE_DB)" $(ARGS)
 
 backtest-managed-ablation: ## [研究] 运行 research-only 执行层消融（SYMBOLS/START/END）

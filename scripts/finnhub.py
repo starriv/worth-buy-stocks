@@ -200,6 +200,68 @@ def _normalize_earnings(data):
     return out
 
 
+def _macro_type(name):
+    text = str(name or "").strip().lower()
+    rules = (
+        ("cpi", ("consumer price", "cpi")),
+        ("pce", ("personal consumption", "pce price")),
+        ("employment", ("nonfarm payroll", "employment situation", "unemployment rate")),
+        ("fomc", ("fomc", "fed interest rate", "federal funds rate")),
+        ("gdp", ("gross domestic product", "gdp")),
+    )
+    return next((kind for kind, terms in rules if any(term in text for term in terms)), None)
+
+
+def _macro_date(value):
+    if isinstance(value, (int, float)) or str(value or "").strip().isdigit():
+        return _date_from_ts(value)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.date.fromisoformat(text[:10]).isoformat()
+    except ValueError:
+        return None
+
+
+def _normalize_economic_calendar(data):
+    data = data if isinstance(data, dict) else {}
+    items = data.get("economicCalendar")
+    if not isinstance(items, list):
+        return []
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        country = str(item.get("country") or "").strip().upper()
+        name = str(item.get("event") or item.get("name") or "").strip()
+        event_type = _macro_type(name)
+        date = _macro_date(item.get("time", item.get("date")))
+        if country in {"US", "USA", "UNITED STATES"} and event_type and date:
+            out.append({
+                "date": date,
+                "type": event_type,
+                "name": name,
+                "country": "US",
+                "importance": str(item.get("impact") or "high").strip().lower(),
+                "source": "Finnhub economic calendar",
+            })
+    out.sort(key=lambda row: (row["date"], row["type"], row["name"]))
+    return out
+
+
+def fetch_economic_calendar(start, end, timeout=15, token=None):
+    """Fetch and normalize US macro releases used by the option entry gate."""
+    raw, error = _safe_fetch(
+        "economic_calendar", "/calendar/economic", {"from": start, "to": end}, token, timeout,
+    )
+    if error:
+        return {"status": error["status"], "events": [], "reason": error["reason"]}
+    if not isinstance(raw, dict) or not isinstance(raw.get("economicCalendar"), list):
+        return {"status": "unavailable", "events": [], "reason": "economic calendar invalid"}
+    return {"status": "ok", "events": _normalize_economic_calendar(raw)}
+
+
 def _safe_fetch(name, path, params, token, timeout):
     try:
         return _request_json(path, params, token=token, timeout=timeout), None

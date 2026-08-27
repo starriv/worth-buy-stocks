@@ -31,7 +31,8 @@ class TestMakefileGateway(unittest.TestCase):
         for target in (
             "analyze", "scan", "status", "sync-assets", "warm-market-plan",
             "reconcile-plan", "cache-purge-all", "backtest-factor", "backtest-visual",
-            "backtest-lifecycle-validate", "backtest-index-lifecycle-validate", "check",
+            "backtest-lifecycle-validate", "backtest-index-lifecycle-validate",
+            "options-report", "options-performance", "check",
         ):
             self.assertIn(target, result.stdout)
         for variable in ("START", "END", "DATA_SOURCE", "COST_BPS", "HTML"):
@@ -96,6 +97,18 @@ class TestMakefileGateway(unittest.TestCase):
         self.assertIn("scripts/backtest.py", result.stdout)
         self.assertIn("lifecycle-validate", result.stdout)
         self.assertIn('--cache-db "/tmp/research.sqlite3"', result.stdout)
+
+    def test_options_report_is_read_only_and_writes_explicit_artifacts(self):
+        result = self.run_make(
+            "-n", "options-report", "OPTIONS_LEDGER_DB=/tmp/options.sqlite3",
+            "OPTIONS_REPORT_DIR=/tmp/options-reports", "ARGS=--notify alerts",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("options_position_manager.py review --live", result.stdout)
+        self.assertIn('--ledger-db "/tmp/options.sqlite3"', result.stdout)
+        self.assertIn('--report-dir "/tmp/options-reports"', result.stdout)
+        self.assertIn("--include-performance", result.stdout)
+        self.assertIn("--notify alerts", result.stdout)
 
     def test_index_etf_validation_uses_unified_cache_only_cli(self):
         result = self.run_make(

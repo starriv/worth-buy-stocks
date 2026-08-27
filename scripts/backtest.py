@@ -23,6 +23,12 @@ from backtesting.lifecycle_validation import (  # noqa: E402
 from backtesting.index_lifecycle_validation import (  # noqa: E402
     run_validation as run_index_lifecycle_validation,
 )
+from backtesting.pragmatic_validation import (  # noqa: E402
+    run_validation as run_pragmatic_validation,
+)
+from backtesting.pragmatic_validation_v1 import (  # noqa: E402
+    run_validation as run_pragmatic_v1_validation,
+)
 from skill_logging import (  # noqa: E402
     add_logging_arguments,
     bind_log_context,
@@ -152,6 +158,26 @@ def _parser() -> argparse.ArgumentParser:
     index_lifecycle.add_argument(
         "--output",
         default="artifacts/backtests/index-etf-lifecycle-holdout-2025-04-04-2026-07-09.json",
+    )
+
+    pragmatic = sub.add_parser(
+        "pragmatic-entry-validate",
+        help="运行预注册务实分段入场 cache-only holdout",
+    )
+    pragmatic.add_argument("--cache-db")
+    pragmatic.add_argument(
+        "--output",
+        default="artifacts/backtests/pragmatic-entry-holdout-2025-01-02-2026-07-10.json",
+    )
+
+    pragmatic_v1 = sub.add_parser(
+        "pragmatic-entry-v1-validate",
+        help="运行第二批独立务实分段入场 v1 cache-only holdout",
+    )
+    pragmatic_v1.add_argument("--cache-db")
+    pragmatic_v1.add_argument(
+        "--output",
+        default="artifacts/backtests/pragmatic-entry-v1-holdout-2025-01-02-2026-07-10.json",
     )
 
     research_help = {
@@ -487,6 +513,66 @@ def _index_lifecycle_validate(args: argparse.Namespace) -> int:
         return EXIT_INTERNAL
 
 
+def _pragmatic_validate(args: argparse.Namespace) -> int:
+    bind_log_context(command="backtest_pragmatic_entry_validate", data_source="cache-only")
+    try:
+        report = run_pragmatic_validation(cache_db=args.cache_db)
+        path = write_validation_report(args.output, report)
+        _json_stdout({
+            "status": "ok",
+            "decision": report["summary"]["decision"],
+            "semantic_hash": report["semantic_hash"],
+            "valid_symbols": report["summary"]["valid_symbols"],
+            "output": str(path),
+        })
+        logger.info(
+            "pragmatic_entry_validation_completed",
+            decision=report["summary"]["decision"],
+            valid_symbols=report["summary"]["valid_symbols"],
+            semantic_hash=report["semantic_hash"],
+            output_path=str(path),
+        )
+        return 0
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("pragmatic_entry_validation_invalid", reason=str(exc))
+        _json_stdout({"error": "validation_invalid", "message": str(exc)})
+        return EXIT_DATA
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        logger.exception("pragmatic_entry_validation_failed", reason=str(exc))
+        _json_stdout({"error": "validation_failed", "message": str(exc)})
+        return EXIT_INTERNAL
+
+
+def _pragmatic_v1_validate(args: argparse.Namespace) -> int:
+    bind_log_context(command="backtest_pragmatic_entry_v1_validate", data_source="cache-only")
+    try:
+        report = run_pragmatic_v1_validation(cache_db=args.cache_db)
+        path = write_validation_report(args.output, report)
+        _json_stdout({
+            "status": "ok",
+            "decision": report["summary"]["decision"],
+            "semantic_hash": report["semantic_hash"],
+            "valid_symbols": report["summary"]["valid_symbols"],
+            "output": str(path),
+        })
+        logger.info(
+            "pragmatic_entry_v1_validation_completed",
+            decision=report["summary"]["decision"],
+            valid_symbols=report["summary"]["valid_symbols"],
+            semantic_hash=report["semantic_hash"],
+            output_path=str(path),
+        )
+        return 0
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("pragmatic_entry_v1_validation_invalid", reason=str(exc))
+        _json_stdout({"error": "validation_invalid", "message": str(exc)})
+        return EXIT_DATA
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        logger.exception("pragmatic_entry_v1_validation_failed", reason=str(exc))
+        _json_stdout({"error": "validation_failed", "message": str(exc)})
+        return EXIT_INTERNAL
+
+
 def _research(args: argparse.Namespace) -> int:
     event, runner = RESEARCH_COMMANDS[args.command]
     if args.timeout < 1:
@@ -529,6 +615,10 @@ def main() -> int:
         return _signal_ablation(args)
     if args.command == "index-lifecycle-validate":
         return _index_lifecycle_validate(args)
+    if args.command == "pragmatic-entry-validate":
+        return _pragmatic_validate(args)
+    if args.command == "pragmatic-entry-v1-validate":
+        return _pragmatic_v1_validate(args)
     return _research(args)
 
 

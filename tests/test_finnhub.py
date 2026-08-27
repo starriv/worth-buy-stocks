@@ -67,6 +67,23 @@ class TestFinnhubFetch(unittest.TestCase):
         self.assertEqual(ctx["status"], "unavailable")
         urlopen.assert_not_called()
 
+    def test_economic_calendar_keeps_supported_us_macro_events(self):
+        payload = {"economicCalendar": [
+            {"country": "US", "event": "CPI Inflation Rate", "date": "2026-09-10", "impact": "high"},
+            {"country": "US", "event": "FOMC Rate Decision", "date": "2026-09-16", "impact": "high"},
+            {"country": "EU", "event": "CPI Inflation Rate", "date": "2026-09-17", "impact": "high"},
+            {"country": "US", "event": "Wholesale Inventories", "date": "2026-09-18", "impact": "medium"},
+        ]}
+        with patch("finnhub._safe_fetch", return_value=(payload, None)):
+            result = F.fetch_economic_calendar(
+                "2026-09-01", "2026-09-30", token="secret-token"
+            )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            [(row["date"], row["type"]) for row in result["events"]],
+            [("2026-09-10", "cpi"), ("2026-09-16", "fomc")],
+        )
+
     def test_fetch_context_reads_token_from_local_env_file(self):
         env_path = self._env_file("FINNHUB_API_KEY=file-token\n")
         with patch.dict(os.environ, {"WORTH_BUY_STOCKS_ENV_FILE": env_path}, clear=True), \

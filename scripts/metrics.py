@@ -124,6 +124,68 @@ def ma(values, n):
     return round(sum(values[-n:]) / n, 4) if len(values) >= n else None
 
 
+def bollinger_series(closes, n=20, deviations=2.0):
+    """Return a time-aligned Bollinger Band series using population stddev.
+
+    Rows before the first complete window are ``None``.  Keeping the primitive
+    here makes stock and option workflows share one deterministic definition.
+    """
+    if n < 2:
+        raise ValueError("bollinger window must be >= 2")
+    if deviations <= 0:
+        raise ValueError("bollinger deviations must be > 0")
+    out = []
+    for idx in range(len(closes)):
+        if idx + 1 < n:
+            out.append(None)
+            continue
+        window = [float(v) for v in closes[idx - n + 1:idx + 1]]
+        middle = sum(window) / n
+        variance = sum((v - middle) ** 2 for v in window) / n
+        std = math.sqrt(variance)
+        upper = middle + deviations * std
+        lower = middle - deviations * std
+        width = upper - lower
+        percent_b = (window[-1] - lower) / width if width else 0.5
+        bandwidth = width / middle * 100 if middle else None
+        zscore = (window[-1] - middle) / std if std else 0.0
+        out.append({
+            "middle": round(middle, 4),
+            "upper": round(upper, 4),
+            "lower": round(lower, 4),
+            "stddev": round(std, 4),
+            "bandwidth_pct": round(bandwidth, 4) if bandwidth is not None else None,
+            "percent_b": round(percent_b, 4),
+            "zscore": round(zscore, 4),
+        })
+    return out
+
+
+def bollinger_bands(closes, n=20, deviations=2.0, slope_lookback=5):
+    """Return the latest Bollinger values plus middle-band slope.
+
+    The slope is the percentage change from the middle band ``slope_lookback``
+    sessions ago.  Insufficient history returns ``None`` instead of silently
+    shortening either window.
+    """
+    if slope_lookback < 1:
+        raise ValueError("bollinger slope_lookback must be >= 1")
+    series = bollinger_series(closes, n=n, deviations=deviations)
+    if not series or series[-1] is None:
+        return None
+    latest = dict(series[-1])
+    prior_idx = len(series) - 1 - slope_lookback
+    prior = series[prior_idx] if prior_idx >= 0 else None
+    prior_middle = prior.get("middle") if isinstance(prior, dict) else None
+    latest["middle_slope_pct"] = (
+        round((latest["middle"] / prior_middle - 1) * 100, 4)
+        if prior_middle else None
+    )
+    latest["window"] = n
+    latest["deviations"] = float(deviations)
+    return latest
+
+
 def pct_return(closes, bars_ago):
     if len(closes) <= bars_ago or closes[-1 - bars_ago] == 0:
         return None

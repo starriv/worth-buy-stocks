@@ -171,6 +171,28 @@ class TestATR(unittest.TestCase):
         self.assertAlmostEqual(M.atr(highs, lows, closes, 14), 2.0, delta=0.01)
 
 
+class TestBollingerBands(unittest.TestCase):
+    def test_constant_series_has_zero_width_and_neutral_percent_b(self):
+        bands = M.bollinger_bands([100.0] * 30, 20, 2.0)
+        self.assertEqual(bands["middle"], 100.0)
+        self.assertEqual(bands["upper"], 100.0)
+        self.assertEqual(bands["lower"], 100.0)
+        self.assertEqual(bands["percent_b"], 0.5)
+        self.assertEqual(bands["middle_slope_pct"], 0.0)
+
+    def test_series_is_time_aligned(self):
+        rows = M.bollinger_series([float(i) for i in range(1, 25)], 20, 2.0)
+        self.assertEqual(len(rows), 24)
+        self.assertTrue(all(row is None for row in rows[:19]))
+        self.assertIsNotNone(rows[19])
+
+    def test_invalid_parameters_fail(self):
+        with self.assertRaises(ValueError):
+            M.bollinger_series([1, 2, 3], 1, 2)
+        with self.assertRaises(ValueError):
+            M.bollinger_series([1, 2, 3], 2, 0)
+
+
 class TestEMASeed(unittest.TestCase):
     """Phase 1: EMA seed="sma" 行为验证。"""
 

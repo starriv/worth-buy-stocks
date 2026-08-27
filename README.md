@@ -13,6 +13,7 @@
 - 生成入场、回踩、止损、2R / 3R 止盈和追价上限。
 - 输出终端 K 线与自包含 HTML 图；可选展示 Claude 第二意见作对照。
 - 对单个标的做 final-only 历史评分回放、21/63 日事件研究和成本后交易仿真，生成 canonical JSON 与交互式 HTML。
+- 模块化筛选 BOLL Bull Put/Bear Call 信用价差、区间震荡 Iron Condor、窄区间 ATM Iron Butterfly，以及初始净 Delta 近零、卖近月买远月的长日历 IV 价差；结合 30D IV 历史、期限结构、标准合约系列、四腿自然价、事件与组合集中度。
 
 ## 快速使用
 
@@ -42,6 +43,11 @@ python3 -m pip install -r ~/.codex/skills/worth-buy-stocks/requirements.txt
 make help
 make analyze SYMBOLS=NVDA,SPY,QQQ
 make scan TOP=20
+make options-analyze SYMBOL=AAPL
+make options-scan TOP=20
+make options-manage
+make options-report
+make options-performance
 ```
 
 Makefile 只转发现有 Python CLI，不复制评分或行情逻辑；recipe 保持静默，因此分析 JSON 仍是 stdout 的唯一业务输出。公共配置通过 `PYTHON`、`CACHE_DB`、`FEED` 等变量覆盖，子命令附加 flag 用 `ARGS`，日志等位于 subcommand 之前的全局 flag 用 `GLOBAL_ARGS`。
@@ -114,6 +120,8 @@ make backtest-visual SYMBOL=AAPL START=2021-07-01 END=2026-07-09
 报告同时展示 21/63 日绝对及相对收益事件研究、非重叠推断样本、rank-only 与 disciplined-verdict 的下一开盘固定研究窗口，以及执行建议仓位、初始止损、1R 保本、移动保护和下一开盘信号退出的 managed 仿真。固定窗口 marker 明确标为研究起点/窗口终点，不代表系统识别高位。HTML 只渲染 canonical artifact，不重算业务指标；历史回测不回填新闻、账户、Snapshot、Finnhub 或 AI opinion。
 
 contract 1.4 另行保留 stateful 实验场景及其恢复/重新入场状态记录。该场景未通过预注册的 16 标的 holdout；随后排除 QQQ/SPY、补齐缓存并对 4 个宽基与 11 个行业 ETF 做分层 holdout，收益改善率也只有 13.33%，再次判定 reject。报告明确标为“已拒绝”，旧 managed 继续作为正式基线。
+
+2026-07-15 另行完成两代 research-only 务实分段入场实验。v0 在首批 24 标的预注册 holdout 判定 reject；v1 改用 5% 试仓、2–5 日确认加仓、未确认退出与追价禁止，并在全新 24 标的 holdout 中取得 73.91% 收益改善率、收益差中位数 +1.3068%、Sharpe 差 +0.2413，但正 benchmark 捕获差只有 +4.7044%（门槛 +8%），且最差标的收益差 −15.7232%（安全线 −15%），仍判定 reject。两代结果只保留为审计研究，不改变生产 v1.2 verdict、仓位或交易计划；同一 holdout 不得用于继续调参。
 
 指数 ETF 分层验证统一由 `make backtest-index-lifecycle-validate` 调用。正式报告中 15/15 ETF 有效，仅 IWM、XLI 改善；6 个 ETF 两个场景均无交易，说明现有首次入场评分仍限制指数参与度。对实际触发 stateful 转换的 9 个 ETF，收益差中位数为 −1.4435%、Sharpe 差中位数为 −0.3559、回撤差中位数为 −4.2901 个百分点、换手比中位数为 2.4286。不得据此升级 ETF 专用生命周期，也不得在同一 holdout 上调参。
 
@@ -224,6 +232,8 @@ flowchart LR
 | Telegram 推送            | `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` |       否 | 只发送结果                        |
 
 默认使用 Alpaca `iex` feed。只有账户具备 SIP 权限且明确需要时才切换到 `sip`。
+
+已有定义风险价差由本地台账管理。`make options-manage` 只读核对 Alpaca 持仓并输出生命周期动作；DTE 使用纽约市场日期，14 DTE 开始计划退出、7 DTE 进入立即退出评估，盘中平仓报价执行 15 分钟与可成交 size 校验。`make options-report` 额外在 `artifacts/options/` 生成中文 Markdown/JSON 日报并附带实际平仓描述性绩效，默认不会发送通知。需要 Telegram 告警时显式传 `ARGS="--notify alerts"`。平仓命令可用 `--quantity` 记录部分平仓，剩余组数继续参与账户核对。`make options-performance` 仅以用户确认的实际开平仓成交分录计算已实现损益、风险回报和检查记录覆盖率，不把剩余未平仓估值计入结果。
 
 可选密钥从以下位置依次读取：
 
