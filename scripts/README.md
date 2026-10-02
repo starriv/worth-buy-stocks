@@ -290,7 +290,9 @@ AI 意见载荷采用字段白名单，输入中不含 `verdict`、`composite` �
 | `local_env.py` | `.env` 查找与可选凭证读取 |
 | `agent_contracts.py` / `validate_agent_contract.py` | 并行产物契约定义与 CLI 校验 |
 | `scanner.py` | 全市场扫描、流动性初筛、两轮评分和新闻复核 |
-| `options_seller.py` | 模块化期权策略 CLI；策略选择、纽约交易日边界、两阶段扫描和离线契约编排 |
+| `options_seller.py` | 模块化期权策略 CLI；纽约交易日边界；scan 限定大盘核心池＋主要指数 ETF，默认 income：方向信用价差优先、铁鹰其次；无盘口初筛，analyze 独立完整合约分析 |
+| `options_engine/universe.py` | 人工复核大盘核心池＋指数 ETF；指定及离线标的同样受限制，期权流动性待券商确认 |
+| `options_engine/prescreen.py` | 无盘口初筛、独立形态排名、逐标的诊断、事件约束期限与 broker 核对清单 |
 | `options_engine/setup.py` | BOLL 触轨收回/回落形态、趋势兼容与标的流动性 |
 | `options_engine/volatility_surface.py` | 当前链 ATM IV、25Δ 偏斜、期限结构与一倍标准差预期波动 |
 | `options_engine/regime.py` | SPY/QQQ 趋势与实现波动率市场状态门控 |

@@ -99,9 +99,9 @@ options-analyze: ## [期权] 按 ARGS 中的 --strategy 分析 SYMBOL（默认�
 		--feed "$(FEED)" --option-feed "$(OPTION_FEED)" \
 		--adjustment "$(ADJUSTMENT)" --cache-db "$(CACHE_DB)" $(ARGS)
 
-options-scan: ## [期权] 模块化两阶段扫描；OPTIONS_SYMBOLS 可覆盖全市场股池
+options-scan: ## [期权] 大盘核心池收租信用价差＋铁鹰初筛；指定标的仍受池限制
 	@$(PYTHON) scripts/options_seller.py $(GLOBAL_ARGS) scan $(OPTIONS_SYMBOLS_ARG) \
-		--feed "$(FEED)" --option-feed "$(OPTION_FEED)" \
+		--feed "$(FEED)" \
 		--adjustment "$(ADJUSTMENT)" --cache-db "$(CACHE_DB)" --top "$(TOP)" $(ARGS)
 
 options-manage: ## [期权] 从本地台账核对账户并实时检查已有信用价差

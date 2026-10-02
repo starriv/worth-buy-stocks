@@ -281,7 +281,7 @@ class TestIronCondorCLI(unittest.TestCase):
             "iron_condor",
         )
 
-    def test_scan_ignores_account_context_equity_and_account_file(self):
+    def test_scan_ignores_offline_account_overlay(self):
         fixture = self._offline_fixture()
         fixture["account_context"] = {
             "status": "ok",
@@ -301,20 +301,17 @@ class TestIronCondorCLI(unittest.TestCase):
         with redirect_stdout(output):
             rc = CLI.main([
                 "scan", "--input", handle.name, "--symbols", "AAPL",
-                "--strategy", "iron_condor", "--chain-top", "1", "--top", "1",
-                "--account-context", "on", "--account-equity", "1",
-                "--account-context-file", "/path/that/must/not/be/read.json",
+                "--strategy", "iron_condor", "--event-top", "1", "--top", "1",
             ])
 
         self.assertEqual(rc, 0)
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["account_context_policy"], "ignored_for_scan")
-        score = payload["symbols"]["AAPL"]["candidates"][0]["score"]
-        self.assertNotIn("account_trading_blocked", score["hard_gate_reasons"])
-        self.assertNotIn("account_risk_above_limit", score["hard_gate_reasons"])
-        self.assertEqual(
-            score["portfolio_risk"]["scope"], "account_independent_scan"
-        )
+        candidate = payload["symbols"]["AAPL"]["candidates"][0]
+        self.assertNotIn("account_trading_blocked", candidate["blocking_reasons"])
+        self.assertNotIn("account_risk_above_limit", candidate["blocking_reasons"])
+        self.assertNotIn("portfolio_risk", candidate)
+
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Modular defined-risk option strategy analyzer and two-stage scanner.
+"""Defined-risk option analyzer and underlying-only strategy scanner.
 
 This command is read-only.  It never invokes Alpaca order, exercise, or position
 mutation commands.  ``--input`` is a hard offline boundary.
@@ -10,7 +10,6 @@ import argparse
 import datetime as dt
 import json
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -33,7 +32,11 @@ from options_engine.live import (
 from options_engine.iv_history import IVHistoryStore, constant_maturity_iv
 from options_engine.portfolio_risk import option_underlyings
 from options_engine.regime import evaluate_market_regime
-from options_engine.service import VERDICT_ORDER, analyze_symbol, screen_underlyings
+from options_engine.service import analyze_symbol
+from options_engine.prescreen import (
+    build_screen, prepare_setups, select_screen_symbols, validate_scan_input,
+)
+from options_engine.universe import restrict_universe, REVIEWED_ON
 from options_engine.setup import evaluate_bollinger_setup
 from options_engine.strategies import resolve_strategy_families
 from options_engine.volatility_surface import build_volatility_surface
@@ -49,10 +52,9 @@ from skill_logging import (
 
 logger = get_logger("options_seller")
 HISTORY_DAYS = 420
-DEFAULT_CHAIN_TOP = 25
+DEFAULT_EVENT_TOP = 25
 DEFAULT_TOP = 20
 _NEW_YORK = ZoneInfo("America/New_York")
-_SCAN_ACCOUNT_CONTEXT = {"status": "ignored_for_scan"}
 
 
 def _utc_now() -> str:
@@ -351,69 +353,51 @@ def analyze(args) -> dict:
     )
 
 
-def _offline_scan_pool(data: dict, requested: list[str]) -> dict[str, list[dict]]:
-    bars = data.get("bars") or {}
-    if requested:
-        return {symbol: bars.get(symbol) or [] for symbol in requested}
-    return {str(symbol).upper(): rows for symbol, rows in bars.items()}
-
-
-def _select_chain_symbols(
-    setups: list[dict], chain_top: int, strategy_families: tuple[str, ...]
-) -> list[str]:
-    """Allocate second-stage chain slots fairly across selected strategy modules."""
-    queues: dict[str, list[str]] = {family: [] for family in strategy_families}
-    for row in setups:
-        family = str(row.get("strategy_family") or "")
-        symbol = str(row.get("symbol") or "")
-        if family in queues and symbol and symbol not in queues[family]:
-            queues[family].append(symbol)
-    selected: list[str] = []
-    while len(selected) < chain_top:
-        progressed = False
-        for family in strategy_families:
-            while queues[family] and queues[family][0] in selected:
-                queues[family].pop(0)
-            if queues[family]:
-                selected.append(queues[family].pop(0))
-                progressed = True
-                if len(selected) >= chain_top:
-                    break
-        if not progressed:
-            break
-    return selected
-
-
 def scan(args) -> dict:
-    cfg = _config(args)
-    strategy_families = resolve_strategy_families(args.strategy)
-    flags: list[str] = []
+    """Screen stock/ETF bars only; never fetch or evaluate option contracts."""
+    cfg = OptionsSellerConfig(**{
+        key: getattr(args, key) for key in (
+            "boll_window", "boll_deviations", "boll_touch_lookback",
+            "dte_min", "dte_max", "macro_event_blackout_days",
+            "calendar_front_dte_min", "calendar_front_dte_max",
+            "calendar_back_dte_min", "calendar_back_dte_max",
+            "calendar_max_middle_slope_pct", "calendar_max_pct_b_deviation",
+            "iron_condor_dte_min", "iron_condor_dte_max",
+            "iron_condor_max_middle_slope_pct", "iron_condor_max_pct_b_deviation",
+            "iron_butterfly_dte_min", "iron_butterfly_dte_max",
+            "iron_butterfly_max_middle_slope_pct", "iron_butterfly_max_pct_b_deviation",
+        )
+    }, min_underlying_price=args.min_price,
+       min_underlying_volume=args.min_volume,
+       min_underlying_dollar_volume=args.min_dollar_volume).validate()
+    families = resolve_strategy_families(args.strategy)
+    flags = []
     requested = _symbols_arg(args)
     if args.input:
         data = _load_json(args.input)
-        validate_offline_input(data, validate_account_context=False)
-        as_of = str(data.get("as_of") or _utc_now())
-        as_of_date = _market_date(as_of)
-        bars_by_symbol = _offline_scan_pool(data, requested)
-        market_regime = evaluate_market_regime(data.get("bars") or {})
-        account_context = _SCAN_ACCOUNT_CONTEXT
-        macro_events = data.get("macro_events")
-        portfolio_bars = data.get("bars") or {}
-        universe_count = len(bars_by_symbol)
+        validate_scan_input(data)
+        as_of = data["as_of"]
+        market_now = dt.datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        if market_now.tzinfo is None:
+            market_now = market_now.replace(tzinfo=dt.timezone.utc)
+        market_now = market_now.astimezone(_NEW_YORK)
+        all_bars = data["bars"]
+        universe = requested or list(all_bars)
+        universe, excluded = restrict_universe(universe)
+        liquid_symbols = universe
         offline = True
     else:
         data = {}
         market_now = _market_now()
         as_of = _utc_now()
-        as_of_date = market_now.date()
-        _validate_live_end(args.end, as_of_date)
-        account_context = _SCAN_ACCOUNT_CONTEXT
+        if args.end and args.end < market_now.date().isoformat():
+            raise ValueError("历史扫描请使用 --input，以保持行情和事件同一时点")
         if requested:
             universe = requested
         else:
             exchanges = tuple(value.strip().upper() for value in args.exchange.split(",") if value.strip())
             universe = filter_options_assets(fetch_options_assets(args.timeout), exchanges)
-        universe_count = len(universe)
+        universe, excluded = restrict_universe(universe)
         pool, snapshot_flags = fetch_liquidity(
             universe, args.feed, cfg.min_underlying_price, cfg.min_underlying_volume,
             chunk=args.snapshot_chunk, timeout=args.timeout,
@@ -421,143 +405,138 @@ def scan(args) -> dict:
         )
         flags.extend(snapshot_flags)
         liquid_symbols = [row["symbol"] for row in pool]
-        start = args.start or (as_of_date - dt.timedelta(days=HISTORY_DAYS)).isoformat()
-        end = args.end or as_of_date.isoformat()
-        portfolio_bars, bar_flags = fetch_pool_bars(
-            liquid_symbols,
-            start, end, args.feed, args.adjustment,
-            chunk=args.bars_chunk, timeout=args.timeout,
+        # Explicit requests must retain diagnostics even when snapshots fail.
+        bar_symbols = universe if requested else liquid_symbols
+        start = args.start or (market_now.date() - dt.timedelta(days=HISTORY_DAYS)).isoformat()
+        all_bars, bar_flags = fetch_pool_bars(
+            bar_symbols, start, args.end or market_now.date().isoformat(),
+            args.feed, args.adjustment, chunk=args.bars_chunk, timeout=args.timeout,
             cache_mode=args.cache, cache_db=args.cache_db,
         )
         flags.extend(bar_flags)
-        portfolio_bars = {
-            symbol: _completed_daily_bars(rows, market_now)
-            for symbol, rows in portfolio_bars.items()
-        }
-        market_regime = evaluate_market_regime(portfolio_bars)
-        macro_events = None
-        # Benchmarks are added by fetch_pool_bars for stock scoring; they are not
-        # option-seller universe members unless explicitly requested.
-        bars_by_symbol = {
-            symbol: rows for symbol, rows in portfolio_bars.items()
-            if symbol in set(liquid_symbols)
-        }
         offline = False
-
-    setups = screen_underlyings(bars_by_symbol, cfg, strategy_families)
-    selected_symbols = _select_chain_symbols(
-        setups, args.chain_top, strategy_families
+    all_bars = {
+        symbol: _completed_daily_bars(rows, market_now)
+        for symbol, rows in all_bars.items()
+    }
+    approved_requested = [s for s in requested if s in universe]
+    bars = {symbol: all_bars.get(symbol) or [] for symbol in (approved_requested or liquid_symbols)}
+    regime = evaluate_market_regime(all_bars)
+    setups, shape_rows, diagnostics = prepare_setups(bars, cfg, families)
+    selected = select_screen_symbols(shape_rows, args.top * len(families), families)
+    event_symbols = selected[:args.event_top]
+    if requested:
+        selected = list(dict.fromkeys(selected + approved_requested))
+    as_of_date = market_now.date()
+    events = data.get("events") or {}
+    macro = data.get("macro_events")
+    if not offline and event_symbols:
+        horizon = max(cfg.dte_max, cfg.calendar_front_dte_max,
+                      cfg.iron_condor_dte_max, cfg.iron_butterfly_dte_max)
+        try:
+            events, event_flags = collect_live_events(
+                event_symbols, as_of_date.isoformat(),
+                (as_of_date + dt.timedelta(days=horizon)).isoformat(), args,
+                horizon_days=horizon,
+            )
+            flags.extend(event_flags)
+        except Exception as exc:
+            events = {}
+            flags.append(f"标的事件查询不可用: {exc}")
+        try:
+            macro, macro_flags = collect_live_macro_events(
+                as_of_date.isoformat(),
+                (as_of_date + dt.timedelta(days=cfg.macro_event_blackout_days + 7)).isoformat(), args,
+            )
+            flags.extend(macro_flags)
+        except Exception as exc:
+            macro = None
+            flags.append(f"宏观事件查询不可用: {exc}")
+    payload = build_screen(
+        setups, shape_rows, diagnostics, events, macro, regime, cfg,
+        as_of=as_of, selected=selected, requested=approved_requested, top=args.top,
+        families=families,
     )
+    for symbol in excluded if requested else []:
+        payload["symbols"][symbol] = {
+            "status": "未通过初筛", "candidates": [],
+            "exclusion_reasons": ["outside_approved_large_cap_or_index_universe"],
+        }
+    payload["universe_policy"] = {
+        "name": "reviewed_large_cap_and_index_core", "reviewed_on": REVIEWED_ON,
+        "excluded_symbols": excluded, "option_liquidity": "requires_broker_confirmation",
+    }
+    payload["counts"]["symbols_returned"] = len(payload["symbols"])
+    payload.update({
+        "offline": offline, "strategy_selection": args.strategy,
+        "account_context_policy": "ignored_for_scan", "data_flags": flags,
+        "config": {key: getattr(args, key) for key in vars(args)
+                   if key not in {"input", "command", "log_level", "log_format"}},
+    })
+    payload["counts"].update({
+        "universe": len(universe), "liquidity_prefilter": len(liquid_symbols),
+        "bars_evaluated": len(bars), "events_requested": 0 if offline else len(event_symbols),
+    })
+    return payload
 
-    if offline and selected_symbols:
-        validate_offline_input(
-            data,
-            required_symbols=selected_symbols,
-            validate_account_context=False,
-        )
 
-    chains: dict[str, dict] = {}
-    events_by_symbol: dict[str, dict] = {}
-    if offline:
-        for symbol in selected_symbols:
-            chains[symbol] = normalize_offline_chain(symbol, (data.get("option_chains") or {}).get(symbol))
-            events_by_symbol[symbol] = (data.get("events") or {}).get(symbol) or {"status": "unavailable"}
-    elif selected_symbols:
-        def fetch_one(symbol: str) -> tuple[str, dict]:
-            setup = evaluate_bollinger_setup(bars_by_symbol[symbol], cfg)
-            try:
-                return symbol, fetch_chain_for_strategies(
-                    symbol, setup, cfg, args, as_of_date, strategy_families
-                )
-            except Exception as exc:  # noqa: BLE001 - one chain must not abort scan
-                return symbol, {"status": "unavailable", "symbol": symbol, "reason": str(exc)}
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("必须为正整数")
+    return number
 
-        workers = max(1, min(args.workers, len(selected_symbols)))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            fetched = [pool.submit(fetch_one, symbol) for symbol in selected_symbols]
-            chain_rows = [future.result() for future in fetched]
-        chains = {symbol: chain for symbol, chain in chain_rows}
-        horizon = max(
-            cfg.dte_max if "vertical_credit" in strategy_families else 0,
-            cfg.calendar_back_dte_max if "calendar_iv" in strategy_families else 0,
-            cfg.iron_condor_dte_max if "iron_condor" in strategy_families else 0,
-            cfg.iron_butterfly_dte_max if "iron_butterfly" in strategy_families else 0,
-        )
-        events_by_symbol, event_flags = collect_live_events(
-            selected_symbols,
-            as_of_date.isoformat(),
-            (as_of_date + dt.timedelta(days=horizon)).isoformat(),
-            args,
-            horizon_days=horizon,
-        )
-        flags.extend(event_flags)
-        macro_events, macro_flags = collect_live_macro_events(
-            as_of_date.isoformat(),
-            (as_of_date + dt.timedelta(days=cfg.macro_event_blackout_days + 7)).isoformat(),
-            args,
-        )
-        flags.extend(macro_flags)
 
-    symbol_results = {}
-    for symbol in selected_symbols:
-        setup = evaluate_bollinger_setup(bars_by_symbol.get(symbol) or [], cfg)
-        surface, history, history_flags = _iv_context(
-            symbol, chains.get(symbol) or {}, setup, as_of, args,
-            offline_history=((data.get("iv_history") or {}).get(symbol) if offline else None),
-        )
-        flags.extend(history_flags)
-        symbol_results[symbol] = analyze_symbol(
-            symbol,
-            bars_by_symbol.get(symbol) or [],
-            chains.get(symbol),
-            events_by_symbol.get(symbol),
-            cfg,
-            as_of=as_of,
-            account_equity=None,
-            market_regime=market_regime,
-            volatility_surface=surface,
-            iv_history_context=history,
-            account_context=account_context,
-            bars_by_symbol=portfolio_bars,
-            macro_events=macro_events,
-            strategy_families=strategy_families,
-        )
-
-    # Rank whole symbols by their best spread, while keeping per-symbol details.
-    def best_rank(symbol: str) -> tuple[int, int, str]:
-        candidates = symbol_results[symbol].get("candidates") or []
-        if not candidates:
-            return 9, 0, symbol
-        score = candidates[0].get("score") or {}
-        return (
-            VERDICT_ORDER.get(score.get("verdict"), 9),
-            -int(score.get("seller_score") or 0),
-            symbol,
-        )
-
-    ordered = sorted(symbol_results, key=best_rank)[:args.top]
-    symbol_results = {symbol: symbol_results[symbol] for symbol in ordered}
-    candidate_count = sum(len(row.get("candidates") or []) for row in symbol_results.values())
-    return _result(
-        "scan", cfg, symbol_results, as_of=as_of,
-        counts={
-            "universe": universe_count,
-            "underlyings_with_setup": len({row["symbol"] for row in setups}),
-            "chains_requested": len(selected_symbols),
-            "symbols_returned": len(symbol_results),
-            "candidates": candidate_count,
-        },
-        flags=flags, offline=offline,
-        strategy_selection=args.strategy,
-        account_context_policy="ignored_for_scan",
-    )
+def _add_scan_arguments(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--strategy", choices=("income", "vertical_credit", "calendar_iv", "iron_condor", "iron_butterfly", "all"), default="income",
+                     help="默认 income：优先方向信用价差，其次铁鹰；日历/铁蝶需显式选择")
+    sub.add_argument("--input", help="离线 as_of + bars，可选 events/macro_events；不触网、不读写缓存")
+    sub.add_argument("--feed", default="iex")
+    sub.add_argument("--adjustment", default="split")
+    sub.add_argument("--start")
+    sub.add_argument("--end")
+    sub.add_argument("--timeout", type=_positive_int, default=30)
+    sub.add_argument("--cache", choices=("auto", "refresh", "off"), default="auto")
+    sub.add_argument("--cache-db")
+    sub.add_argument("--events", choices=("auto", "on", "off"), default="auto")
+    sub.add_argument("--macro-events", choices=("auto", "on", "off"), default="auto")
+    sub.add_argument("--macro-events-file")
+    sub.add_argument("--macro-event-blackout-days", type=int, default=1)
+    sub.add_argument("--finnhub-timeout", type=_positive_int, default=15)
+    sub.add_argument("--symbols")
+    sub.add_argument("--symbols-file")
+    sub.add_argument("--exchange", default="AMEX,ARCA,BATS,NASDAQ,NYSE,NYSEARCA")
+    sub.add_argument("--snapshot-chunk", type=_positive_int, default=200)
+    sub.add_argument("--bars-chunk", type=_positive_int, default=80)
+    sub.add_argument("--event-top", type=_positive_int, default=DEFAULT_EVENT_TOP,
+                     help="最多查询多少个候选标的的事件；不请求期权链")
+    sub.add_argument("--top", type=_positive_int, default=DEFAULT_TOP,
+                     help="每类策略最多返回的初筛方向数；指定标的全部保留诊断")
+    defaults = OptionsSellerConfig()
+    for key in (
+        "boll_window", "boll_touch_lookback", "dte_min", "dte_max",
+        "calendar_front_dte_min", "calendar_front_dte_max",
+        "calendar_back_dte_min", "calendar_back_dte_max",
+        "iron_condor_dte_min", "iron_condor_dte_max",
+        "iron_butterfly_dte_min", "iron_butterfly_dte_max",
+    ):
+        sub.add_argument("--" + key.replace("_", "-"), type=_positive_int, default=getattr(defaults, key))
+    for key in (
+        "boll_deviations", "calendar_max_middle_slope_pct", "calendar_max_pct_b_deviation",
+        "iron_condor_max_middle_slope_pct", "iron_condor_max_pct_b_deviation",
+        "iron_butterfly_max_middle_slope_pct", "iron_butterfly_max_pct_b_deviation",
+    ):
+        sub.add_argument("--" + key.replace("_", "-"), type=float, default=getattr(defaults, key))
+    sub.add_argument("--min-price", type=float, default=20.0)
+    sub.add_argument("--min-volume", type=float, default=100_000.0)
+    sub.add_argument("--min-dollar-volume", type=float, default=20_000_000.0)
 
 
 def _add_shared(sub: argparse.ArgumentParser) -> None:
     sub.add_argument(
         "--strategy",
         choices=(
-            "vertical_credit", "calendar_iv", "iron_condor", "iron_butterfly", "all"
+            "income", "vertical_credit", "calendar_iv", "iron_condor", "iron_butterfly", "all"
         ),
         default="vertical_credit",
         help="选择垂直信用价差、Delta 近零 IV 日历、Iron Condor、Iron Butterfly 或全部",
@@ -581,15 +560,15 @@ def _add_shared(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--finnhub-timeout", type=int, default=15)
     sub.add_argument(
         "--account-equity", type=float,
-        help="仅用于单标的 analyze 的账户风险预算；scan 始终忽略",
+        help="单标的 analyze 的账户风险预算",
     )
     sub.add_argument(
         "--account-context", choices=("auto", "on", "off"), default="auto",
-        help="仅用于单标的 analyze 的只读账户 overlay；scan 始终忽略",
+        help="单标的 analyze 的只读账户 overlay",
     )
     sub.add_argument(
         "--account-context-file",
-        help="仅用于单标的 analyze 的离线账户 overlay；scan 始终忽略",
+        help="单标的 analyze 的离线账户 overlay",
     )
     sub.add_argument("--max-risk-pct", type=float, default=0.5)
     sub.add_argument("--max-symbol-option-risk-pct", type=float, default=2.0)
@@ -666,16 +645,8 @@ def _parser(argv=None) -> argparse.Namespace:
     single = commands.add_parser("analyze", help="按所选策略分析单一标的")
     _add_shared(single)
     single.add_argument("--symbol", required=True)
-    market = commands.add_parser("scan", help="两阶段扫描期权卖方标的")
-    _add_shared(market)
-    market.add_argument("--symbols", help="逗号分隔的覆盖股池")
-    market.add_argument("--symbols-file")
-    market.add_argument("--exchange", default="AMEX,ARCA,BATS,NASDAQ,NYSE,NYSEARCA")
-    market.add_argument("--snapshot-chunk", type=int, default=200)
-    market.add_argument("--bars-chunk", type=int, default=80)
-    market.add_argument("--workers", type=int, default=4)
-    market.add_argument("--chain-top", type=int, default=DEFAULT_CHAIN_TOP)
-    market.add_argument("--top", type=int, default=DEFAULT_TOP)
+    market = commands.add_parser("scan", help="仅基于标的价量与事件的期权策略初筛")
+    _add_scan_arguments(market)
     return parser.parse_args(argv)
 
 

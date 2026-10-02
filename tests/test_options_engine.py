@@ -556,7 +556,8 @@ class TestOfflineCLI(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = json.loads(output.getvalue())
         self.assertTrue(payload["offline"])
-        self.assertEqual(payload["counts"]["chains_requested"], 1)
+        self.assertEqual(payload["scope"], "underlying_only")
+        self.assertNotIn("chains_requested", payload["counts"])
         self.assertIn("AAPL", payload["symbols"])
 
     def test_contract_rejects_unsorted_bars(self):

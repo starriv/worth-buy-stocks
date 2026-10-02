@@ -201,7 +201,7 @@ class TestCalendarIVModule(unittest.TestCase):
 
 
 class TestCalendarIVCLI(unittest.TestCase):
-    def test_all_selection_round_robins_chain_budget_across_modules(self):
+    def test_all_selection_round_robins_event_budget_across_modules(self):
         setups = [
             {"symbol": "CAL1", "strategy_family": "calendar_iv"},
             {"symbol": "CAL2", "strategy_family": "calendar_iv"},
@@ -209,7 +209,7 @@ class TestCalendarIVCLI(unittest.TestCase):
             {"symbol": "VERT2", "strategy_family": "vertical_credit"},
         ]
         self.assertEqual(
-            CLI._select_chain_symbols(
+            CLI.select_screen_symbols(
                 setups, 2, ("vertical_credit", "calendar_iv")
             ),
             ["VERT1", "CAL1"],

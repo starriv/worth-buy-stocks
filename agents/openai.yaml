@@ -1,4 +1,4 @@
 interface:
   display_name: "值得买 - 股票与期权策略"
-  short_description: "美股趋势评分、信用价差、Iron Condor/Butterfly 与日历筛选"
-  default_prompt: "用 $worth-buy-stocks 按策略模块扫描期权标的，分别列出垂直信用价差、Iron Condor、Iron Butterfly 和 Delta 近零长日历 IV 价差。"
+  short_description: "美股趋势评分与收租优先的定义风险信用价差初筛"
+  default_prompt: "用 $worth-buy-stocks 按收租目标扫描：优先 Bull Put/Bear Call 信用价差，其次铁鹰。写明方向、Call/Put 和买卖腿模板，并报告事件窗口与券商待核对项。"

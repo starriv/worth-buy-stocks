@@ -20,6 +20,10 @@ def available_strategy_families() -> tuple[str, ...]:
 
 def resolve_strategy_families(selection: str | None) -> tuple[str, ...]:
     value = str(selection or "vertical_credit").strip().lower()
+    if value == "income":
+        # Default rent collection: directional credits first, range credits next.
+        # Debit calendars and ATM butterflies require an explicit request.
+        return ("vertical_credit", "iron_condor")
     if value == "all":
         return available_strategy_families()
     if value not in _MODULES:
